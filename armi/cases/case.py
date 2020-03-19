@@ -25,6 +25,7 @@ armi.cases.suite : A collection of Cases
 """
 import cProfile
 import os
+import pathlib
 import pstats
 import re
 import sys
@@ -39,6 +40,7 @@ import six
 import coverage
 
 import armi
+from armi import context
 from armi import settings
 from armi import operators
 from armi import runLog
@@ -52,6 +54,7 @@ from armi.bookkeeping.db import compareDatabases
 from armi.utils import pathTools
 from armi.utils.directoryChangers import DirectoryChanger
 from armi.utils.directoryChangers import ForcedCreationDirectoryChanger
+from armi.utils import textProcessors
 from armi.nucDirectory import nuclideBases
 
 # change from default .coverage to help with Windows dotfile issues.
@@ -192,6 +195,8 @@ class Case:
                     r"^(?P<dirName>.*[\/\\])?(?P<title>[^\/\\]+)-SHUFFLES\.txt$",
                 )
             )
+        # ensure that a case doesn't appear to be its own dependency
+        dependencies.discard(self)
 
         return dependencies
 
@@ -282,6 +287,12 @@ class Case:
         Set the task dependence based on the :code:`dependencies`.
 
         This accounts for whether or not the dependency is enabled.
+
+        Note
+        ----
+        This is a leftover from before the release of the ARMI framework. The API of the
+        proprietary cluster communication library is being used here. This should either
+        be moved out into the cluster plugin, or the library should be made available.
         """
         if not self.enabled:
             return
@@ -311,6 +322,12 @@ class Case:
             cov = coverage.Coverage(
                 config_file=os.path.join(armi.RES, "coveragerc"), debug=["dataio"]
             )
+            if context.MPI_SIZE > 1:
+                # interestingly, you cannot set the parallel flag in the constructor
+                # without auto-specifying the data suffix. This should enable
+                # parallel coverage with auto-generated data file suffixes and
+                # combinations.
+                cov.config.parallel = True
             cov.start()
 
         profiler = None
@@ -361,21 +378,25 @@ class Case:
                 armi.MPI_COMM.barrier()  # force waiting for everyone to finish
 
             if armi.MPI_RANK == 0 and armi.MPI_SIZE > 1:
+                # combine all the parallel coverage data files into one and make
+                # the XML and HTML reports for the whole run.
                 combinedCoverage = coverage.Coverage(
                     config_file=os.path.join(armi.RES, "coveragerc"), debug=["dataio"]
                 )
+                combinedCoverage.config.parallel = True
                 # combine does delete the files it merges
                 combinedCoverage.combine()
                 combinedCoverage.save()
                 combinedCoverage.html_report()
                 combinedCoverage.xml_report()
 
-    def initializeOperator(self):
+    def initializeOperator(self, r=None):
         """Creates and returns an Operator."""
         with DirectoryChanger(self.cs.inputDirectory):
             self._initBurnChain()
             o = operators.factory(self.cs)
-            r = reactors.factory(self.cs, self.bp)
+            if not r:
+                r = reactors.factory(self.cs, self.bp)
             o.initializeInterfaces(r)
             # Set this here to make sure the full duration of initialization is properly captured.
             # Cannot be done in reactors since the above self.bp call implicitly initializes blueprints.
@@ -425,21 +446,15 @@ class Case:
                             textwrap.fill(
                                 query.question, width=50, break_long_words=False
                             ),
-                            query.autoResolved,
                         )
                     )
 
                 if queryData:
-                    runLog.header("=========== Input Queries ===========")
+                    runLog.header("=========== Settings Input Queries ===========")
                     runLog.info(
                         tabulate.tabulate(
                             queryData,
-                            headers=[
-                                "Number",
-                                "Statement",
-                                "Question",
-                                "Auto-resolved",
-                            ],
+                            headers=["Number", "Statement", "Question"],
                             tablefmt="armi",
                         )
                     )
@@ -495,9 +510,8 @@ class Case:
         """
         Clone existing ARMI inputs to current directory with optional settings modifications.
 
-        Since each case depends on multiple inputs, this is a safer
-        way to move cases around without having to wonder if you
-        copied all the files appropriately.
+        Since each case depends on multiple inputs, this is a safer way to move cases
+        around without having to wonder if you copied all the files appropriately.
 
         Parameters
         ----------
@@ -536,12 +550,7 @@ class Case:
 
         fromPath = lambda fname: pathTools.armiAbsPath(self.cs.inputDirectory, fname)
 
-        for inputFileSetting in [
-            "loadingFile",
-            "geomFile",
-            "shuffleLogic",
-            "explicitRepeatShuffles",
-        ]:
+        for inputFileSetting in ["loadingFile", "geomFile"]:
             fileName = self.cs[inputFileSetting]
             if fileName:
                 pathTools.copyOrWarn(
@@ -556,11 +565,21 @@ class Case:
 
         copyInterfaceInputs(self.cs, clone.cs.inputDirectory)
 
-        for system in self.bp.systemDesigns or []:
-            if system.latticeFile:
+        with open(self.cs["loadingFile"], "r") as f:
+            for includePath, mark in textProcessors.findYamlInclusions(
+                f, root=pathlib.Path(self.cs.inputDirectory)
+            ):
+                if not includePath.exists():
+                    raise OSError(
+                        "The input file file `{}` referenced at {} does not exist.".format(
+                            includePath, mark
+                        )
+                    )
                 pathTools.copyOrWarn(
-                    "system lattice for {}".format(system.name),
-                    fromPath(system.latticeFile),
+                    "auxiliary input file `{}` referenced at {}".format(
+                        includePath, mark
+                    ),
+                    fromPath(includePath),
                     clone.cs.inputDirectory,
                 )
 
@@ -605,7 +624,7 @@ class Case:
 
         return code
 
-    def writeInputs(self):
+    def writeInputs(self, sourceDir: Optional[str] = None):
         """
         Write the inputs to disk.
 
@@ -613,10 +632,16 @@ class Case:
         for a parameter sweep or migration) to be written out as input
         for a forthcoming case.
 
+        Parameters
+        ----------
+        sourceDir : str, optional
+            The path to copy inputs from (if different from the cs.path). Needed
+            in SuiteBuilder cases to find the baseline inputs from plugins (e.g. shuffleLogic)
+
         Notes
         -----
         This will rename the ``loadingFile`` and ``geomFile`` to be ``title-blueprints + '.yaml'`` and
-        ``title + '-geom.xml'`` respectively.
+        ``title + '-geom.yaml'`` respectively.
 
         See Also
         --------
@@ -633,23 +658,25 @@ class Case:
             self.bp
             self.geom
             self.cs["loadingFile"] = self.title + "-blueprints.yaml"
-            self.cs["geomFile"] = self.title + "-geom.xml"
+            if self.geom:
+                self.cs["geomFile"] = self.title + "-geom.yaml"
+                self.geom.writeGeom(self.cs["geomFile"])
             if self.independentVariables:
                 self.cs["independentVariables"] = [
                     "({}, {})".format(repr(varName), repr(val))
                     for varName, val in self.independentVariables.items()
                 ]
 
-            self.cs.writeToYamlFile(self.title + ".yaml")
-            self.geom.writeGeom(self.cs["geomFile"])
-
             with open(self.cs["loadingFile"], "w") as loadingFile:
                 blueprints.Blueprints.dump(self.bp, loadingFile)
 
-            copyInterfaceInputs(self.cs, self.directory)
+            # copy input files from other modules (e.g. fuel management, control logic, etc.)
+            copyInterfaceInputs(self.cs, ".", sourceDir)
+
+            self.cs.writeToYamlFile(self.title + ".yaml")
 
 
-def copyInterfaceInputs(cs, destination):
+def copyInterfaceInputs(cs, destination: str, sourceDir: Optional[str] = None):
     """
     Copy sets of files that are considered "input" from each active interface.
 
@@ -657,6 +684,7 @@ def copyInterfaceInputs(cs, destination):
     modular way.
     """
     activeInterfaces = interfaces.getActiveInterfaceInfo(cs)
+    sourceDir = sourceDir or cs.inputDirectory
     for klass, kwargs in activeInterfaces:
         if not kwargs.get("enabled", True):
             # Don't consider disabled interfaces
@@ -664,6 +692,10 @@ def copyInterfaceInputs(cs, destination):
         interfaceFileNames = klass.specifyInputs(cs)
         for label, fileNames in interfaceFileNames.items():
             for f in fileNames:
+                if not f:
+                    continue
                 pathTools.copyOrWarn(
-                    label, pathTools.armiAbsPath(cs.inputDirectory, f), destination
+                    label,
+                    pathTools.armiAbsPath(sourceDir, f),
+                    os.path.join(destination, f),
                 )

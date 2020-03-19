@@ -32,11 +32,25 @@ state to the database and loading it back again, as well as extracting historica
 for a given object or collection of object from the database file. When interacting with
 the database file, the ``Layout`` class is used to help map the hierarchical Composite
 Reactor Model to the flat representation in the database.
+
+Minor revision changelog
+------------------------
+ - 3.1: Improve the handling of reading/writing grids.
+
+ - 3.2: Change the strategy for storing large attributes from using an Object Reference
+   to an external dataset to using a special string starting with an "@" symbol (e.g.,
+   "@/c00n00/attrs/5_linkedDims"). This was done to support copying time node datasets
+   from one file to another without invalidating the references. Support is maintained
+   for reading previous versions, and for performing a ``mergeHistory()`` and converting
+   to the new reference strategy, but the old version cannot be written.
+
 """
 import collections
+import copy
 import io
 import itertools
 import os
+import pathlib
 import re
 import sys
 import time
@@ -47,11 +61,9 @@ from typing import (
     Dict,
     Any,
     List,
-    Union,
     Sequence,
     MutableSequence,
     Generator,
-    Type,
 )
 
 import numpy
@@ -69,13 +81,20 @@ from armi.reactor import assemblies
 from armi.reactor.assemblies import Assembly
 from armi.reactor.blocks import Block
 from armi.reactor.components import Component
-from armi.reactor.composites import ArmiObject, Composite
+from armi.reactor.composites import ArmiObject
 from armi.reactor import grids
-from armi import operators
 from armi.bookkeeping.db.types import History, Histories
 from armi.bookkeeping.db import database
+from armi.reactor import geometry
+from armi.utils.textProcessors import resolveMarkupInclusions
 
 ORDER = interfaces.STACK_ORDER.BOOKKEEPING
+DB_VERSION = "3.2"
+
+ATTR_LINK = re.compile("^@(.*)$")
+
+_SERIALIZER_NAME = "serializerName"
+_SERIALIZER_VERSION = "serializerVersion"
 
 
 def getH5GroupName(cycle, timeNode, statePointName=None):
@@ -85,6 +104,14 @@ def getH5GroupName(cycle, timeNode, statePointName=None):
 def describeInterfaces(cs):
     """Function for exposing interface(s) to other code"""
     return (DatabaseInterface, {"enabled": cs["db"]})
+
+
+def updateGlobalAssemblyNum(r):
+    assemNum = r.core.p.maxAssemNum
+    if assemNum is not None:
+        assemblies.setAssemNumCounter(int(assemNum + 1))
+    else:
+        raise ValueError("Could not load maxAssemNum from the database")
 
 
 class DatabaseInterface(interfaces.Interface):
@@ -128,11 +155,11 @@ class DatabaseInterface(interfaces.Interface):
     def initDB(self):
         """
         Open the underlying database to be written to, and write input files to DB.
-        
+
         Notes
         -----
-        Main Interface calls this so that the database is available as early as 
-        possible in the run. The database interface interacts near the end of the 
+        Main Interface calls this so that the database is available as early as
+        possible in the run. The database interface interacts near the end of the
         interface stack (so that all the parameters have been updated) while the Main
         Interface interacts first.
         """
@@ -145,16 +172,16 @@ class DatabaseInterface(interfaces.Interface):
         self._db = Database3(self.cs.caseTitle + ".h5", "w")
         self._db.open()
 
-        # Grab geomString here because the DB-level has no access to the reactor or blueprints
-        # or anything.
-        # There's not always a geomFile; sometimes geom is brought in via systems.
-        # Eventually, we'll need to store multiple of these (one for each system).
-        # Just do core for now.
-        geomFileName = self.r.blueprints.systemDesigns["core"].latticeFile
-        with open(
-            os.path.join(os.path.dirname(self.cs.path), geomFileName), "r"
-        ) as fileStream:
-            geomString = fileStream.read()
+        # Grab geomString here because the DB-level has no access to the reactor or
+        # blueprints or anything.
+        # There's not always a geomFile; we are moving towards the core grid definition
+        # living in the blueprints themselves. In this case, the db doesnt need to store
+        # a geomFile at all.
+        if self.cs["geomFile"]:
+            with open(os.path.join(self.cs.inputDirectory, self.cs["geomFile"])) as f:
+                geomString = f.read()
+        else:
+            geomString = ""
         self._db.writeInputsToDB(self.cs, geomString=geomString)
 
     def interactEveryNode(self, cycle, node):
@@ -172,7 +199,10 @@ class DatabaseInterface(interfaces.Interface):
 
     def interactEOC(self, cycle=None):
         """In case anything changed since last cycle (e.g. rxSwing), update DB. """
-        if cycle < self.cs["nCycles"] - 1:
+        # We cannot presume whether we are at EOL based on cycle and cs["nCycles"],
+        # since cs["nCycles"] is not a difinitive indicator of EOL; ultimately the
+        # Operator has the final say.
+        if not self.o.atEOL:
             self.r.core.p.minutesSinceStart = (
                 time.time() - self.r.core.timeOfStart
             ) / 60.0
@@ -181,7 +211,7 @@ class DatabaseInterface(interfaces.Interface):
     def interactEOL(self):
         """DB's should be closed at run's end. """
         # minutesSinceStarts should include as much of the ARMI run as possible so EOL
-        # is necessary  too.
+        # is necessary, too.
         self.r.core.p.minutesSinceStart = (time.time() - self.r.core.timeOfStart) / 60.0
         self._db.writeToDB(self.r)
         self._db.close(True)
@@ -230,7 +260,7 @@ class DatabaseInterface(interfaces.Interface):
     def _getLoadDB(self, fileName):
         """
         Return the database to load from in order of preference.
-        
+
         Notes
         -----
         If filename is present only returns one database since specifically instructed
@@ -253,26 +283,29 @@ class DatabaseInterface(interfaces.Interface):
     ):
         """
         Loads a fresh reactor and applies it to the Operator.
-        
+
         Notes
         -----
-        timeStepName is not currently supportred by database load.
         Will load preferentially from the `fileName` if passed. Otherwise will load from
         existing database in memory or `cs["reloadDBName"]` in that order.
-        
+
         Raises
         ------
         RuntimeError
             If fileName is specified and that  file does not have the time step.
-            If fileName is not specified and neither the database in memory, nor the 
+            If fileName is not specified and neither the database in memory, nor the
             `cs["reloadDBName"]` have the time step specified.
         """
 
         for potentialDatabase in self._getLoadDB(fileName):
             with potentialDatabase as loadDB:
-                if loadDB.hasTimeStep(cycle, timeNode, statePointName=""):
+                if loadDB.hasTimeStep(cycle, timeNode, statePointName=timeStepName):
                     newR = loadDB.load(
-                        cycle, timeNode, self.cs, self.r.blueprints, self.r.core.geom
+                        cycle,
+                        timeNode,
+                        statePointName=timeStepName,
+                        cs=self.cs,
+                        bp=self.r.blueprints,
                     )
                     break
         else:
@@ -290,11 +323,7 @@ class DatabaseInterface(interfaces.Interface):
             )
 
         if updateGlobalAssemNum:
-            assemNum = newR.core.p.maxAssemNum
-            if assemNum is not None:
-                assemblies.setAssemNumCounter(int(assemNum + 1))
-            else:
-                raise ValueError("Could not load maxAssemNum from the database")
+            updateGlobalAssemblyNum(newR)
 
         self.o.reattach(newR, self.cs)
 
@@ -349,6 +378,8 @@ class DatabaseInterface(interfaces.Interface):
         """
         now = (self.r.p.cycle, self.r.p.timeNode)
         nowRequested = timeSteps is None
+        if timeSteps is not None:
+            timeSteps = copy.copy(timeSteps)
         if timeSteps is not None and now in timeSteps:
             nowRequested = True
             timeSteps.remove(now)
@@ -380,8 +411,6 @@ class Database3(database.Database):
     `doc/user/outputs/database` for more details.
     """
 
-    version = "3"
-
     timeNodeGroupPattern = re.compile(r"^c(\d\d)n(\d\d)$")
 
     def __init__(self, fileName: str, permission: str):
@@ -409,6 +438,31 @@ class Database3(database.Database):
         # closed.
         self._openCount: int = 0
 
+        if permission == "w":
+            self.version = DB_VERSION
+        else:
+            # will be set upon read
+            self._version = None
+            self._versionMajor = None
+            self._versionMinor = None
+
+    @property
+    def version(self):
+        return self._version
+
+    @version.setter
+    def version(self, value):
+        self._version = value
+        self._versionMajor, self._versionMinor = (int(v) for v in value.split("."))
+
+    @property
+    def versionMajor(self):
+        return self._versionMajor
+
+    @property
+    def versionMinor(self):
+        return self._versionMinor
+
     def __repr__(self):
         return "<{} {}>".format(
             self.__class__.__name__, repr(self.h5db).replace("<", "").replace(">", "")
@@ -423,9 +477,10 @@ class Database3(database.Database):
         filePath = self._fileName
         self._openCount += 1
 
-        if self._permission == "r":
+        if self._permission in {"r", "a"}:
             self._fullPath = os.path.abspath(filePath)
             self.h5db = h5py.File(filePath, self._permission)
+            self.version = self.h5db.attrs["databaseVersion"]
             return
 
         if self._permission == "w":
@@ -443,7 +498,7 @@ class Database3(database.Database):
         self.h5db = h5py.File(filePath, self._permission)
         self.h5db.attrs["successfulCompletion"] = False
         self.h5db.attrs["version"] = armi.__version__
-        self.h5db.attrs["databaseVersion"] = "3"
+        self.h5db.attrs["databaseVersion"] = self.version
         self.h5db.attrs["user"] = armi.USER
         self.h5db.attrs["python"] = sys.version
         self.h5db.attrs["armiLocation"] = os.path.dirname(armi.ROOT)
@@ -453,13 +508,6 @@ class Database3(database.Database):
     def close(self, completedSuccessfully=False):
         """
         Close the DB and perform cleanups and auto-conversions.
-
-        Notes
-        -----
-        Visualization tools like XTVIEW are still using DB format 2, so this
-        will (for now) auto-generate a full XTVIEW-compatible database
-        upon closing. It does this here because, in remote runs, this is where
-        the I/O is fastest.
         """
         self._openCount = 0
         if self.h5db is None:
@@ -474,41 +522,8 @@ class Database3(database.Database):
         self.h5db = None
 
         if self._permission == "w":
-            try:
-                self._autoConvertDBToXTVIEW()
-            except:  # pylint: disable=bare-except; never sacrifice the main DB
-                pass
             # move out of the FAST_PATH and into the working directory
             shutil.move(self._fullPath, self._fileName)
-
-    def _autoConvertDBToXTVIEW(self):
-        """
-        Make auto-conversion of DB to visualizable XTVIEW format.
-
-        This is a non-trivial operation that should be removed
-        when XTVIEW can read the Version 3 database.
-        """
-        from armi.bookkeeping.db import convertDatabase
-
-        name, ext = os.path.splitext(self._fileName)
-        xtname = f"{name}-xtview{ext}"
-        xtpath = os.path.join(armi.FAST_PATH, xtname)
-        # master cs issues: See T2330.
-        # Here, the cs becomes invalid if we continue with an operator
-        # after performing a DB conversion.
-        masterCs = settings.getMasterCs()
-        try:
-            convertDatabase(
-                inputDBName=self._fullPath, outputDBName=xtpath, outputVersion="2"
-            )
-            shutil.move(xtpath, xtname)
-        except:
-            # fail silently on this convenience. Sometimes (in tests)
-            # the DB isn't actually written even when it's opened.
-            pass
-        finally:
-            # Always restore master cs to stay consistent, even in failures
-            settings.setMasterCs(masterCs)
 
     def splitDatabase(
         self, keepTimeSteps: Sequence[Tuple[int, int]], label: str
@@ -594,20 +609,20 @@ class Database3(database.Database):
 
         cs = settings.Settings()
         cs.caseTitle = os.path.splitext(os.path.basename(self.fileName))[0]
-        cs.loadFromString(self.h5db["inputs/settings"].value)
+        cs.loadFromString(self.h5db["inputs/settings"][()])
         return cs
 
     def loadBlueprints(self):
         from armi.reactor import blueprints
 
-        bp = blueprints.Blueprints.load(self.h5db["inputs/blueprints"].value)
+        stream = io.StringIO(self.h5db["inputs/blueprints"][()])
+        stream = blueprints.Blueprints.migrate(stream)
+        bp = blueprints.Blueprints.load(stream)
         return bp
 
     def loadGeometry(self):
-        from armi.reactor import geometry
-
         geom = geometry.SystemLayoutInput()
-        geom.readGeomFromStream(io.StringIO(self.h5db["inputs/geomFile"].value))
+        geom.readGeomFromStream(io.StringIO(self.h5db["inputs/geomFile"][()]))
         return geom
 
     def writeInputsToDB(self, cs, csString=None, geomString=None, bpString=None):
@@ -623,8 +638,8 @@ class Database3(database.Database):
         This is hard-coded to read the entire file contents into memory and write that
         directly into the database. We could have the cs/blueprints/geom write to a
         string, however the ARMI log file contains a hash of each files' contents. In
-        the future, we will be able to reproduce calculation showing that the inputs are
-        identical.
+        the future, we should be able to reproduce a calculation with confidence that
+        the inputs are identical.
         """
         caseTitle = (
             cs.caseTitle if cs is not None else os.path.splitext(self.fileName)[0]
@@ -639,10 +654,10 @@ class Database3(database.Database):
             csString = stream.read()
 
         if bpString is None:
-            with open(
-                os.path.join(os.path.dirname(cs.path), cs["loadingFile"]), "r"
-            ) as fileStream:
-                bpString = fileStream.read()
+            # Ensure that the input as stored in the DB is complete
+            bpString = resolveMarkupInclusions(
+                pathlib.Path(cs.inputDirectory) / cs["loadingFile"]
+            ).read()
 
         self.h5db["inputs/settings"] = csString
         self.h5db["inputs/geomFile"] = geomString
@@ -650,9 +665,9 @@ class Database3(database.Database):
 
     def readInputsFromDB(self):
         return (
-            self.h5db["inputs/settings"].value,
-            self.h5db["inputs/geomFile"].value,
-            self.h5db["inputs/blueprints"].value,
+            self.h5db["inputs/settings"][()],
+            self.h5db["inputs/geomFile"][()],
+            self.h5db["inputs/blueprints"][()],
         )
 
     def mergeHistory(self, inputDB, startCycle, startNode):
@@ -673,6 +688,22 @@ class Database3(database.Database):
                 return
             self.h5db.copy(h5ts, h5ts.name)
 
+            if inputDB.versionMinor < 2:
+                # The source database may have object references in some attributes.
+                # make sure to link those up using our manual path strategy.
+                references = []
+
+                def findReferences(name, obj):
+                    for key, attr in obj.attrs.items():
+                        if isinstance(attr, h5py.h5r.Reference):
+                            references.append((name, key, inputDB.h5db[attr].name))
+
+                h5ts.visititems(findReferences)
+
+                for key, attr, path in references:
+                    destTs = self.h5db[h5ts.name]
+                    destTs[key].attrs[attr] = "@{}".format(path)
+
     def __enter__(self):
         """Context management support"""
         if self._openCount == 0:
@@ -692,6 +723,12 @@ class Database3(database.Database):
     def __del__(self):
         if self.h5db is not None:
             self.close(False)
+
+    def __delitem__(self, tn: Tuple[int, int, Optional[str]]):
+        cycle, timeNode, statePointName = tn
+        name = getH5GroupName(cycle, timeNode, statePointName)
+        if self.h5db is not None:
+            del self.h5db[name]
 
     def genTimeStepGroups(
         self, timeSteps: Sequence[Tuple[int, int]] = None
@@ -779,7 +816,7 @@ class Database3(database.Database):
         for comps in groupedComps.values():
             self._writeParams(h5group, comps)
 
-    def load(self, cycle, node, cs=None, bp=None, geom=None):
+    def load(self, cycle, node, cs=None, bp=None, statePointName=None):
         """Load a new reactor from (cycle, node).
 
         Case settings, blueprints, and geom can be provided by the client, or read from
@@ -798,8 +835,11 @@ class Database3(database.Database):
             if not provided one is read from the database
         bp : armi.reactor.Blueprints (Optional)
             if not provided one is read from the database
-        geom : armi.geometry.Geometry (Optional)
-            if not provided one is read from the database
+
+        Returns
+        -------
+        root : ArmiObject
+            The top-level object stored in the database; usually a Reactor.
         """
         runLog.info("Loading reactor state for time node ({}, {})".format(cycle, node))
 
@@ -807,14 +847,11 @@ class Database3(database.Database):
         # apply to avoid defaults in getMasterCs calls
         settings.setMasterCs(cs)
         bp = bp or self.loadBlueprints()
-        geom = geom or self.loadGeometry()
 
-        comps = []
-        groupedComps = collections.defaultdict(list)
-        h5group = self.h5db[getH5GroupName(cycle, node)]
+        h5group = self.h5db[getH5GroupName(cycle, node, statePointName)]
 
         layout = Layout(h5group=h5group)
-        comps, groupedComps = layout._initComps(cs, bp, geom)
+        comps, groupedComps = layout._initComps(cs, bp)
 
         # populate data onto initialized components
         for compType, compTypeList in groupedComps.items():
@@ -823,24 +860,15 @@ class Database3(database.Database):
         # assign params from blueprints
         self._assignBlueprintsParams(bp, groupedComps)
 
-        # Re-assign names to assemblies and blocks based on the read-in assemnum. Should
-        # the name be a param?
-        for a in groupedComps[Assembly]:
-            name = a.makeNameFromAssemNum(a.p.assemNum)
-            a.name = name
-            a.renameBlocksAccordingToAssemblyNum()
-
         # stitch together
         self._compose(iter(comps), cs)
-
-        rootComponent = comps[0][0]
 
         # also, make sure to update the global serial number so we don't re-use a number
         parameterCollections.GLOBAL_SERIAL_NUM = max(
             parameterCollections.GLOBAL_SERIAL_NUM, layout.serialNum.max()
         )
-
-        return comps[0][0]
+        root = comps[0][0]
+        return root  # usually reactor object
 
     @staticmethod
     def _assignBlueprintsParams(blueprints, groupedComps):
@@ -880,14 +908,7 @@ class Database3(database.Database):
             comp.remove(spontaneousChild)
 
         if isinstance(comp, Core):
-            # TODO: This is questionable, and an artifact of how we deal with the geom
-            # objects. There is a "the" geom object for the reactor core, and other
-            # geoms, which are specified in the blueprints for other Core objects. We
-            # are only storing the main geom object input in the db, and using that to
-            # make all Core objects in their __init__() calls. So we need to override
-            # these, which are derived from the main geom.
-            comp._symmetry = comp.p.symmetry
-            comp.geomType = comp.p.geomType
+            pass
         elif isinstance(comp, Assembly):
             # Assemblies force their name to be something based on assemNum. When the
             # assembly is created it gets a new assemNum, and throws out the correct
@@ -927,7 +948,7 @@ class Database3(database.Database):
             # the SFP, etc.
             if comp.hasFlags(Flags.CORE):
                 comp.processLoading(cs)
-        if isinstance(comp, Assembly):
+        elif isinstance(comp, Assembly):
             comp.calculateZCoords()
 
         return comp
@@ -949,7 +970,6 @@ class Database3(database.Database):
             attrs = {}
 
             if hasattr(c, "DIMENSION_NAMES") and paramDef.name in c.DIMENSION_NAMES:
-                # assume failure due to linked dimensions
                 linkedDims = []
                 data = []
 
@@ -969,8 +989,19 @@ class Database3(database.Database):
                 # XXX: side effect is that after loading previously unset values will be
                 # the default
                 temp = [c.p.get(paramDef.name, paramDef.default) for c in comps]
-                data = numpy.array(temp)
-                del temp
+                if paramDef.serializer is not None:
+                    data, sAttrs = paramDef.serializer.pack(temp)
+                    assert (
+                        data.dtype.kind != "O"
+                    ), "{} failed to convert {} to a numpy-supported type.".format(
+                        paramDef.serializer.__name__, paramDef.name
+                    )
+                    attrs.update(sAttrs)
+                    attrs[_SERIALIZER_NAME] = paramDef.serializer.__name__
+                    attrs[_SERIALIZER_VERSION] = paramDef.serializer.version
+                else:
+                    data = numpy.array(temp)
+                    del temp
 
             # Convert Unicode to byte-string
             if data.dtype.kind == "U":
@@ -1012,8 +1043,8 @@ class Database3(database.Database):
             try:
                 if paramDef.name in g:
                     raise ValueError(
-                        "`{}` was already in database. This time node "
-                        "should have been empty".format(paramDef.name)
+                        "`{}` was already in `{}`. This time node "
+                        "should have been empty".format(paramDef.name, g)
                     )
                 else:
                     dataset = g.create_dataset(
@@ -1032,10 +1063,32 @@ class Database3(database.Database):
     def _readParams(h5group, compTypeName, comps):
         g = h5group[compTypeName]
 
+        renames = armi.getApp().getParamRenames()
+
+        pDefs = comps[0].pDefs
+
         # this can also be made faster by specializing the method by type
         for paramName, dataSet in g.items():
+            # Honor historical databases where the parameters may have changed names
+            # since.
+            while paramName in renames:
+                paramName = renames[paramName]
+
+            pDef = pDefs[paramName]
+
             data = dataSet[:]
             attrs = _resolveAttrs(dataSet.attrs, h5group)
+
+            if pDef.serializer is not None:
+                assert _SERIALIZER_NAME in dataSet.attrs
+                assert dataSet.attrs[_SERIALIZER_NAME] == pDef.serializer.__name__
+                assert _SERIALIZER_VERSION in dataSet.attrs
+
+                data = numpy.array(
+                    pDef.serializer.unpack(
+                        data, dataSet.attrs[_SERIALIZER_VERSION], attrs
+                    )
+                )
 
             if data.dtype.type is numpy.string_:
                 data = numpy.char.decode(data)
@@ -1051,10 +1104,17 @@ class Database3(database.Database):
             for c, val, linkedDim in itertools.zip_longest(
                 comps, data.tolist(), linkedDims, fillvalue=""
             ):
-                if linkedDim != "":
-                    c.p[paramName] = linkedDim
-                else:
-                    c.p[paramName] = val
+                try:
+                    if linkedDim != "":
+                        c.p[paramName] = linkedDim
+                    else:
+                        c.p[paramName] = val
+                except AssertionError as ae:
+                    # happens when a param was deprecated but being loaded from old DB
+                    runLog.warning(
+                        f"{str(ae)}\nSkipping load of invalid param `{paramName}`"
+                        " (possibly loading from old DB)\n"
+                    )
 
     def getHistory(
         self,
@@ -1162,6 +1222,7 @@ class Database3(database.Database):
                 # differences.
                 # 1) we are not assigning to p[paramName]
                 # 2) not using linkedDims at all
+                # 3) not performing parameter renaming. This may become necessary
                 for paramName in params or h5GroupForType.keys():
                     if paramName == "location":
                         # cast to a numpy array so that we can use list indices
@@ -1253,7 +1314,7 @@ class Layout(object):
         # set of grid parameters that have been seen in _createLayout. For efficient
         # checks for uniqueness
         self._seenGridParams = dict()
-        # actual list of grid paramters, with stable order for safe indexing
+        # actual list of grid parameters, with stable order for safe indexing
         self.gridParams = []
 
         self.groupedComps = collections.defaultdict(list)
@@ -1356,7 +1417,6 @@ class Layout(object):
             )
 
             gridGroup = h5group["layout/grids"]
-            nGrids = gridGroup.attrs["nGrids"]
             gridTypes = [t.decode() for t in gridGroup["type"][:]]
 
             self.gridParams = []
@@ -1373,9 +1433,25 @@ class Layout(object):
                         bounds.append(None)
                 unitStepLimits = thisGroup["unitStepLimits"][:]
                 offset = thisGroup["offset"][:] if thisGroup.attrs["offset"] else None
+                geomType = (
+                    thisGroup["geomType"][()] if "geomType" in thisGroup else None
+                )
+                symmetry = (
+                    thisGroup["symmetry"][()] if "symmetry" in thisGroup else None
+                )
 
                 self.gridParams.append(
-                    (gridType, (unitSteps, bounds, unitStepLimits, offset))
+                    (
+                        gridType,
+                        grids.GridParameters(
+                            unitSteps,
+                            bounds,
+                            unitStepLimits,
+                            offset,
+                            geomType,
+                            symmetry,
+                        ),
+                    )
                 )
 
         except KeyError as e:
@@ -1384,7 +1460,7 @@ class Layout(object):
             )
             raise e
 
-    def _initComps(self, cs, bp, geom):
+    def _initComps(self, cs, bp):
         comps = []
         groupedComps = collections.defaultdict(list)
 
@@ -1413,9 +1489,9 @@ class Layout(object):
             Klass = ArmiObject.TYPES[compType]
 
             if issubclass(Klass, Reactor):
-                comp = Klass(cs, bp)
+                comp = Klass(cs.caseTitle, bp)
             elif issubclass(Klass, Core):
-                comp = Klass(name, cs, geom)
+                comp = Klass(name)
             elif issubclass(Klass, Component):
                 # XXX: initialize all dimensions to 0, they will be loaded and assigned
                 # after load
@@ -1496,19 +1572,23 @@ class Layout(object):
 
             for igrid, gridParams in enumerate(gp[1] for gp in self.gridParams):
                 thisGroup = gridsGroup.create_group(str(igrid))
-                thisGroup.create_dataset("unitSteps", data=gridParams[0])
+                thisGroup.create_dataset("unitSteps", data=gridParams.unitSteps)
 
-                for ibound, bound in enumerate(gridParams[1]):
+                for ibound, bound in enumerate(gridParams.bounds):
                     if bound is not None:
                         bound = numpy.array(bound)
                         thisGroup.create_dataset("bounds_{}".format(ibound), data=bound)
 
-                thisGroup.create_dataset("unitStepLimits", data=gridParams[2])
+                thisGroup.create_dataset(
+                    "unitStepLimits", data=gridParams.unitStepLimits
+                )
 
-                offset = gridParams[3]
+                offset = gridParams.offset
                 thisGroup.attrs["offset"] = offset is not None
                 if offset is not None:
                     thisGroup.create_dataset("offset", data=offset)
+                thisGroup.create_dataset("geomType", data=gridParams.geomType)
+                thisGroup.create_dataset("symmetry", data=gridParams.symmetry)
         except RuntimeError:
             runLog.error("Failed to create datasets in: {}".format(h5group))
             raise
@@ -1611,7 +1691,15 @@ def packSpecialData(
 
     """
 
+    # Check to make sure that we even need to do this. If the numpy data type is
+    # not "O", chances are we have nice, clean data.
+    if data.dtype != "O":
+        return data, {}
+
     attrs: Dict[str, Any] = {"specialFormatting": True}
+
+    # make a copy of the data, so that the original is unchanged
+    data = copy.copy(data)
 
     # find locations of Nones. The below works for ndarrays, whereas `data == None`
     # gives a single True/False value
@@ -1621,10 +1709,10 @@ def packSpecialData(
         # Everything is None, so why bother?
         return None, attrs
 
-    if nones.any():
+    if len(nones) > 0:
         attrs["nones"] = True
 
-    # XXX: this whole if/iften/elif/else can be optimized by looping once and then
+    # XXX: this whole if/then/elif/else can be optimized by looping once and then
     #      determining the correct action
     # A robust solution would need
     # to do this on a case-by-case basis, and re-do it any time we want to
@@ -1745,8 +1833,13 @@ def unpackSpecialData(data: numpy.ndarray, attrs, paramName: str) -> numpy.ndarr
     --------
     packSpecialData
     """
+    if not attrs.get("specialFormatting", False):
+        # The data were not subjected to any special formatting; short circuit.
+        assert data.dtype != "O"
+        return data
+
     unpackedData: List[Any]
-    if attrs.get("nones", False):
+    if attrs.get("nones", False) and not attrs.get("jagged", False):
         data = replaceNonsenseWithNones(data, paramName)
         return data
     if attrs.get("jagged", False):
@@ -1812,7 +1905,7 @@ def replaceNonsenseWithNones(data: numpy.ndarray, paramName: str) -> numpy.ndarr
         isNone = data == "<!None!>"
     else:
         raise TypeError(
-            "Unable to resolve values that should be None for {}".format(paramName)
+            "Unable to resolve values that should be None for `{}`".format(paramName)
         )
 
     if data.ndim > 1:
@@ -1967,6 +2060,11 @@ def _writeAttrs(obj, group, attrs):
     limited space. If an attribute is too large, h5py raises a RuntimeError.
     In such cases, this will store the attribute data in a proper dataset and
     place a reference to that dataset in the attribute instead.
+
+    In practice, this takes ``linkedDims`` attrs from a particular component type (like
+    ``c00n00/Circle/id``) and stores them in new datasets (like
+    ``c00n00/attrs/1_linkedDims``, ``c00n00/attrs/2_linkedDims``) and then sets the
+    object's attrs to links to those datasets.
     """
     for key, value in attrs.items():
         try:
@@ -1987,17 +2085,37 @@ def _writeAttrs(obj, group, attrs):
             dataName = str(len(attrGroup)) + "_" + key
             attrGroup[dataName] = value
 
-            obj.attrs[key] = attrGroup[dataName].ref
+            # using a soft link here allows us to cheaply copy time nodes without
+            # needing to crawl through and update object references.
+            linkName = attrGroup[dataName].name
+            obj.attrs[key] = "@{}".format(linkName)
 
 
 def _resolveAttrs(attrs, group):
     """
-    Reverse the action of _writeAttrs
+    Reverse the action of _writeAttrs.
+
+    This reads actual attrs and looks for the real data
+    in the datasets that the attrs were pointing to.
     """
     resolved = {}
     for key, val in attrs.items():
-        if isinstance(val, h5py.h5r.Reference):
-            resolved[key] = group[val]
-        else:
-            resolved[key] = val
+        try:
+            if isinstance(val, h5py.h5r.Reference):
+                # Old style object reference. If this cannot be dereferenced, it is
+                # likely because mergeHistory was used to get the current database,
+                # which does not preserve references.
+                resolved[key] = group[val]
+            elif isinstance(val, str):
+                m = ATTR_LINK.match(val)
+                if m:
+                    # dereference the path to get the data out of the dataset.
+                    resolved[key] = group[m.group(1)][()]
+                else:
+                    resolved[key] = val
+            else:
+                resolved[key] = val
+        except ValueError:
+            runLog.error(f"HDF error loading {key} : {val}\nGroup: {group}")
+            raise
     return resolved

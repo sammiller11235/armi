@@ -50,6 +50,7 @@ from armi import runLog
 from armi.reactor import grids
 from armi.utils import asciimaps
 
+
 SYSTEMS = "systems"
 VERSION = "version"
 
@@ -65,11 +66,11 @@ ANNULUS_SECTOR_PRISM = "AnnulusSectorPrism"
 
 VALID_GEOMETRY_TYPE = {HEX, RZT, RZ, CARTESIAN}
 
-FULL_CORE = "full core"
-THIRD_CORE = "third core "
-QUARTER_CORE = "quarter core "
-EIGHTH_CORE = "eighth core "
-SIXTEENTH_CORE = "sixteenth core "
+FULL_CORE = "full"
+THIRD_CORE = "third "
+QUARTER_CORE = "quarter "
+EIGHTH_CORE = "eighth "
+SIXTEENTH_CORE = "sixteenth "
 REFLECTIVE = "reflective"
 PERIODIC = "periodic"
 THROUGH_CENTER_ASSEMBLY = (
@@ -173,15 +174,16 @@ for symmetry in VALID_SYMMETRY:
 
 def loadFromCs(cs):
     """Function to load Geoemtry based on supplied ``CaseSettings``."""
-    from armi.utils import directoryChangers  # circular import protection
-
+    from armi.utils import directoryChangers  # pylint: disable=import-outside-toplevel; circular import protection
+    if not cs["geomFile"]:
+        return None
     with directoryChangers.DirectoryChanger(cs.inputDirectory):
         geom = SystemLayoutInput()
         geom.readGeomFromFile(cs["geomFile"])
         return geom
 
 
-class SystemLayoutInput(object):
+class SystemLayoutInput:
     """Geometry file. Contains 2-D mapping of geometry."""
 
     _GEOM_FILE_EXTENSION = ".xml"
@@ -228,12 +230,50 @@ class SystemLayoutInput(object):
         except ET.ParseError:
             stream.seek(0)
             self._readYaml(stream)
+        self._applyMigrations()
+
+    def toGridBlueprint(self, name: str = "core"):
+        """Migrate old-style SystemLayoutInput to new GridBlueprint."""
+        from armi.reactor.blueprints.gridBlueprint import GridBlueprint
+
+        geom = self.geomType
+        symmetry = self.symmetry
+
+        bounds = None
+
+        if self.geomType == RZT:
+            # We need a grid in order to go from whats in the input to indices, and to
+            # be able to provide grid bounds to the blueprint.
+            rztGrid = grids.thetaRZGridFromGeom(self)
+            theta, r, _ = rztGrid.getBounds()
+            bounds = {"theta": theta, "r": r}
+
+        gridContents = dict()
+        for indices, spec in self.assemTypeByIndices.items():
+            if HEX in self.geomType:
+                i, j = grids.getIndicesFromRingAndPos(*indices)
+            elif RZT in self.geomType:
+                i, j, _ = rztGrid.indicesOfBounds(*indices[0:4])
+            else:
+                i, j = indices
+            gridContents[i, j] = spec
+
+        bp = GridBlueprint(
+            name=name,
+            gridContents=gridContents,
+            geom=geom,
+            symmetry=symmetry,
+            gridBounds=bounds,
+        )
+
+        bp.eqPathInput = self.eqPathInput
+
+        return bp
 
     def _readXml(self, stream):
         tree = ET.parse(stream)
         root = tree.getroot()
         self._getGeomTypeAndSymmetryFromXml(root)
-        self._checkGeomAndSymmetry()
         self.assemTypeByIndices.clear()
 
         for assemblyNode in root:
@@ -325,15 +365,21 @@ class SystemLayoutInput(object):
                 f"{self.symmetry} not supported."
             )
 
+    def _applyMigrations(self):
+        # remove "core" so we can use symmetry for in-block things as well
+        # as core maps
+        self.symmetry = self.symmetry.replace(" core", "")
+
     def modifyEqPaths(self, modifiedPaths):
         """
         Modifies the geometry object by updating the equilibrium path indices and equilibrium path cycles.
-        
+
         Parameters
         ----------
         modifiedPaths : dict, required
-            This is a dictionary that contains the indices that are mapped to the eqPathIndex and eqPathCycle.
-            modifiedPath[indices] = (eqPathIndex, eqPathCycle)
+            This is a dictionary that contains the indices that are mapped to the
+            eqPathIndex and eqPathCycle.  modifiedPath[indices] = (eqPathIndex,
+            eqPathCycle)
         """
         runLog.important("Modifying the equilibrium paths on {}".format(self))
         self.eqPathsHaveBeenModified = True
@@ -481,18 +527,6 @@ class SystemLayoutInput(object):
         else:
             self.symmetry = str(root.attrib[INP_SYMMETRY]).lower()
 
-    def _checkGeomAndSymmetry(self):
-        if self.geomType not in VALID_GEOMETRY_TYPE:
-            raise ValueError(
-                "Geom type {} is invalid. Valid (case insensitive) geom types are {}"
-                "".format(symmetry, VALID_SYMMETRY)
-            )
-        if self.symmetry not in VALID_SYMMETRY:
-            raise ValueError(
-                "Symmetry {} is invalid. Valid (case insensitive) symmetries are {}"
-                "".format(symmetry, VALID_SYMMETRY)
-            )
-
 
 def fromReactor(reactor):
     """
@@ -504,7 +538,7 @@ def fromReactor(reactor):
     """
     geom = SystemLayoutInput()
     runLog.info("Reading core map from {}".format(reactor))
-    geom.geomType = reactor.core.p.geomType
+    geom.geomType = reactor.core.geomType
     geom.symmetry = reactor.core.symmetry
 
     bp = reactor.blueprints
@@ -520,10 +554,6 @@ def fromReactor(reactor):
             assembly.spatialLocator.getCompleteIndices()
         )
         geom.maxRings = max(x, geom.maxRings)
-
-        if reactor.core.geom:
-            # may need to be updated later.
-            geom.eqPathInput = reactor.core.geom.eqPathInput
 
         geom.assemTypeByIndices[indices] = aType
 

@@ -19,6 +19,7 @@ various reports
 import re
 import os
 import collections
+import pathlib
 import textwrap
 import sys
 import time
@@ -33,6 +34,8 @@ from armi import utils
 from armi.utils import iterables
 from armi.utils import units
 from armi.utils import pathTools
+from armi.utils import textProcessors
+from armi import interfaces
 from armi.bookkeeping import report
 from armi.reactor.flags import Flags
 from armi.reactor.components import ComponentType
@@ -60,12 +63,11 @@ def writeWelcomeHeaders(o, cs):
                 "{} - {}".format(cs["runType"], o.__class__.__name__),
             ),
             (strings.Operator_CurrentUser, armi.USER),
-            (strings.Operator_ArmiCodebase, cs["armiLocation"]),
+            (strings.Operator_ArmiCodebase, armi.ROOT),
             (strings.Operator_WorkingDirectory, os.getcwd()),
             (strings.Operator_PythonInterperter, sys.version),
             (strings.Operator_MasterMachine, os.environ.get("COMPUTERNAME", "?")),
             (strings.Operator_NumProcessors, armi.MPI_SIZE),
-            (strings.Operator_Date, time.ctime()),
             (strings.Operator_Date, armi.START_TIME),
         ]
 
@@ -75,24 +77,43 @@ def writeWelcomeHeaders(o, cs):
     def _listInputFiles(cs):
         """
         Gathers information about the input files of this case.
-    
+
         Returns
         -------
         inputInfo : list
             (label, fileName, shaHash) tuples
         """
+
+        pathToLoading = pathlib.Path(cs.inputDirectory) / cs["loadingFile"]
+
+        if pathToLoading.is_file():
+            includedBlueprints = [
+                inclusion[0]
+                for inclusion in textProcessors.findYamlInclusions(pathToLoading)
+            ]
+        else:
+            includedBlueprints = []
+
         inputInfo = []
-        inputFiles = [
-            ("Case Settings", cs.caseTitle + ".yaml"),
-            ("Blueprints", cs["loadingFile"]),
-            ("Geometry", cs["geomFile"]),
-        ]
-        if cs["shuffleLogic"]:
-            inputFiles.append(("Fuel Management", cs["shuffleLogic"]))
-        if cs["controlLogic"]:
-            inputFiles.append(("Control Logic", cs["controlLogic"]))
-        if cs["orificeSettingsFile"]:
-            inputFiles.append(("Orifice Settings", cs["orificeSettingsFile"]))
+        inputFiles = (
+            [
+                ("Case Settings", cs.caseTitle + ".yaml"),
+                ("Blueprints", cs["loadingFile"]),
+            ]
+            + [("Included blueprints", inclBp) for inclBp in includedBlueprints]
+            + [("Geometry", cs["geomFile"])]
+        )
+
+        activeInterfaces = interfaces.getActiveInterfaceInfo(cs)
+        for klass, kwargs in activeInterfaces:
+            if not kwargs.get("enabled", True):
+                # Don't consider disabled interfaces
+                continue
+            interfaceFileNames = klass.specifyInputs(cs)
+            for label, fileNames in interfaceFileNames.items():
+                for fName in fileNames:
+                    inputFiles.append((label, fName))
+
         if cs["reloadDBName"] and cs["runType"] == RunTypes.SNAPSHOTS:
             inputFiles.append(("Database", cs["reloadDBName"]))
         for label, fName in inputFiles:
@@ -165,10 +186,6 @@ def writeWelcomeHeaders(o, cs):
 
     if armi.MPI_RANK > 0:
         return  # prevent the worker nodes from printing the same thing
-
-    #  make sure armiLocation is consistent with what's truly running.
-    if os.path.join(cs["armiLocation"], "armi") != armi.ROOT:
-        warnings.Operator_executionScriptDiffersFromArmiLocation(armi.ROOT)
 
     _writeCaseInformation(o, cs)
     _writeInputFileInformation(cs)
@@ -252,7 +269,7 @@ def writeAssemblyMassSummary(r):
                 count += 1
             else:
                 # add 3 if it's 1/3 core, etc.
-                count += core.p.powerMultiplier
+                count += core.powerMultiplier
 
         # Get the dominant materials
         pinMaterialKey = "pinMaterial"
@@ -518,6 +535,10 @@ def summarizePowerPeaking(core):
     maxPowAssem = maxPowBlock.parent
     avgPDens = maxPowAssem.calcAvgParam("pdens")
     peakPDens = maxPowAssem.getMaxParam("pdens")
+    if not avgPDens:
+        # protect against divide-by-zero. Peaking doesnt make sense if there is no
+        # power.
+        return
     axPeakF = peakPDens / avgPDens
 
     # Fxy is the radial peaking factor, looking at ALL assemblies with axially integrated powers.
@@ -543,7 +564,7 @@ def summarizePower(core):
     core : armi.reactor.reactors.Core
     """
     sums = collections.defaultdict(lambda: 0.0)
-    pmult = core.p.powerMultiplier
+    pmult = core.powerMultiplier
     for a in core:
         sums[a.getType()] += a.calcTotalParam("power") * pmult
 
@@ -570,11 +591,10 @@ def summarizeZones(core, cs):
 
     """
 
-    if not cs["doTH"]:
-        runLog.warning("Cannot summarize peak and average w/o TH data. Rerun with TH")
-        return
-
     totPow = core.getTotalBlockParam("power")
+    if not totPow:
+        # protect against divide-by-zero
+        return
     powList = []  # eventually will be a sorted list of power
     for a in core.getAssemblies():
         if a.hasFlags(Flags.FUEL):
@@ -604,6 +624,11 @@ def summarizeZones(core, cs):
             pFracList.append(pFrac)
         totFrac += pFrac
 
+    if not pFracList:
+        # sometimes this is empty (why?), which causes an error below when
+        # calling max(pFracList)
+        return
+
     if abs(totFrac - 1.0) < 1e-4:
         runLog.warning("total power fraction not equal to sum of assembly powers.")
 
@@ -618,7 +643,7 @@ def summarizeZones(core, cs):
     avgAssem = highPow[avgIndex]  # the actual average assembly
 
     # ok, now need counts, and peak and avg. flow and power in high power region.
-    mult = core.p.powerMultiplier
+    mult = core.powerMultiplier
 
     summary = "Zone Summary For Safety Analysis cycle {0}\n".format(core.r.p.cycle)
     summary += "  Assemblies in high-power zone: {0}\n".format(len(highPow) * mult)
@@ -745,7 +770,7 @@ def _setGeneralCoreParametersData(core, cs, coreDesignTable):
         coreDesignTable,
         report.DESIGN,
     )
-    corePowerMult = int(core.p.powerMultiplier)
+    corePowerMult = int(core.powerMultiplier)
     report.setData(
         "Core Total Volume",
         "{:.2f} cc".format(totalVolume * corePowerMult),

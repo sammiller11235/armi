@@ -27,9 +27,11 @@ import os
 import re
 from typing import Tuple, Generator
 import traceback
+import itertools
 
 import numpy
 
+import armi
 from armi import runLog
 from armi import settings
 from armi import utils
@@ -110,20 +112,29 @@ class XTViewDatabase:
 
         cs = settings.Settings()
         cs.caseTitle = os.path.splitext(os.path.basename(self._hdf_file.filename))[0]
-        cs.loadFromString(self._hdf_file["inputs/settings"].value)
+        cs.loadFromString(self._hdf_file["inputs/settings"][()])
         return cs
 
     def loadBlueprints(self):
         from armi.reactor import blueprints
 
-        bp = blueprints.Blueprints.load(self._hdf_file["inputs/blueprints"].value)
+        stream = io.StringIO(self._hdf_file["inputs/blueprints"][()])
+        stream = blueprints.Blueprints.migrate(stream)
+        bp = blueprints.Blueprints.load(stream)
+
         return bp
 
     def loadGeometry(self):
         from armi.reactor import geometry
 
         geom = geometry.SystemLayoutInput()
-        geom.readGeomFromStream(io.StringIO(self._hdf_file["inputs/geomFile"].value))
+        geomData = self._hdf_file["inputs/geomFile"][()]
+        if isinstance(geomData, bytes):
+            # different versions of the code may have outputted these differently,
+            # possibly when using using python2, or possibly from different versions of
+            # h5py handling strings differently.
+            geomData = geomData.decode()
+        geom.readGeomFromStream(io.StringIO(geomData))
         return geom
 
     def load(self, cycle, node, cs=None, bp=None, geom=None):
@@ -209,9 +220,9 @@ class XTViewDatabase:
 
     def readInputsFromDB(self):
         return (
-            self._hdf_file["inputs/settings"].value,
-            self._hdf_file["inputs/geomFile"].value,
-            self._hdf_file["inputs/blueprints"].value,
+            self._hdf_file["inputs/settings"][()],
+            self._hdf_file["inputs/geomFile"][()],
+            self._hdf_file["inputs/blueprints"][()],
         )
 
     def updateFromDB(self, reactor, dbTimeStep, updateIndividualAssemblyNumbers=True):
@@ -397,7 +408,7 @@ class XTViewDatabase:
                             )
                         param = newParam
 
-                b.p[param] = val
+                setParameterWithRenaming(b, param, val)
 
     def _updateReactorParams(self, reactor, dbTimeStep):
         """Update reactor-/core-level parameters from the database"""
@@ -452,7 +463,8 @@ class XTViewDatabase:
                 ring, pos = a.spatialLocator.getRingPos()
                 for assemParamName in assemParams:
                     val = assemParamData[assemParamName, ring, pos]
-                    a.p[assemParamName] = val
+                    setParameterWithRenaming(a, assemParamName, val)
+
                     if assemParamName == "assemNum" and val:
                         # update assembly name based on assemNum
                         name = a.makeNameFromAssemNum(val)
@@ -560,10 +572,12 @@ class XTViewDatabase:
         """
         Update block heights and reactor axial mesh based on block param values in database.
 
-        This must be done before the number densities are read in so the dimensions of the core are consistent.
+        This must be done before the number densities are read in so the dimensions of
+        the core are consistent.
 
-        The refAssem writes the neutronics mesh. This method is necessary  in case the refAssem
-        has been removed. Assume all fuel assemblies have the same mesh unless there is ``detailedAxialExpansion``.
+        The refAssem writes the neutronics mesh. This method is necessary  in case the
+        refAssem has been removed. Assume all fuel assemblies have the same mesh unless
+        there is ``detailedAxialExpansion``.
 
         Mass must be conserved of the fuel, even in the BOL assemblies, especially if
         shuffling and depletion is to occur after loading.
@@ -1000,7 +1014,8 @@ class XTViewDatabase:
 
     def _getParamNames(self, objName):
         # TODO: add a set of names as attributes somewhere so it's reliably exhaustive?
-        # using the last TS currently to get all parameters defined, iterating across each entry is way too slow
+        # using the last TS currently to get all parameters defined, iterating across
+        # each entry is way too slow
         # TODO: should allow a specific TS lookup in the case of loadState
         last_ts = self.getAllTimesteps()[-1]
         return list(self._hdf_file["{}/{}".format(last_ts, objName)].keys())
@@ -1017,10 +1032,18 @@ class XTViewDatabase:
         # need to try both since Reactor and Core are squashed in the DB.
         try:
             # pylint: disable=protected-access
-            paramDef = reactors.Reactor.paramCollectionType._paramDefs[param]
+            paramDef = reactors.Reactor.paramCollectionType.pDefs[param]
         except KeyError:
             # pylint: disable=protected-access
-            paramDef = reactors.Core.paramCollectionType._paramDefs[param]
+            try:
+                paramDef = reactors.Core.paramCollectionType.pDefs[param]
+            except KeyError:
+                # Dead parameter?
+                runLog.warning(
+                    "Reactor/Core parameter `{}` was unrecognized and is being "
+                    "ignored.".format(param)
+                )
+
         all_vals = []
         for timestep in timesteps:
             value = self._get_1d_dataset("{}/reactors/{}".format(timestep, param))
@@ -1087,10 +1110,16 @@ def setParameterWithRenaming(obj, parameter, value):
     This allows older databases to work with newer ARMI versions if the parameter renames are
     properly recorded.
     """
+    # Watch out, this might be slow if it isn't cached by the App
+    renames = armi.getApp().getParamRenames()
+    name = parameter
+
+    while name in renames:
+        name = renames[name]
+
     try:
-        name = parameters.RENAMES.get(parameter, parameter)
         obj.p[name] = value
-    except parameters.UnknownParameterError:
+    except (parameters.UnknownParameterError, AssertionError):
         runLog.warning(
             "Incompatible database has unsupported parameter: "
             '"{}", and will be ignored!'.format(parameter),

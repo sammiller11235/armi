@@ -92,6 +92,8 @@ def loadTestReactor(
     o : Operator
     r : Reactor
     """
+    # TODO: it would be nice to have this be more stream-oriented. Juggling files is
+    # devilishly difficult.
     global TEST_REACTOR
     isotopicDepletion.applyDefaultBurnChain()
     fName = os.path.join(inputFilePath, inputFileName)
@@ -126,7 +128,7 @@ def loadTestReactor(
 
     # put some stuff in the SFP too.
     for a in range(10):
-        a = o.r.blueprints.constructAssem(o.r.core.p.geomType, o.cs, name="feed fuel")
+        a = o.r.blueprints.constructAssem(o.r.core.geomType, o.cs, name="feed fuel")
         o.r.core.sfp.add(a)
 
     o.r.core.regenAssemblyLists()
@@ -178,11 +180,11 @@ class ReactorTests(_ReactorTests):
         # verify that the block params are being read.
         val = self.r.core.getTotalBlockParam("power")
         val2 = self.r.core.getTotalBlockParam("power", addSymmetricPositions=True)
-        self.assertEqual(val2 / self.r.core.p.powerMultiplier, val)
+        self.assertEqual(val2 / self.r.core.powerMultiplier, val)
 
     def test_growToFullCore(self):
         nAssemThird = len(self.r.core)
-        self.assertEqual(self.r.core.p.powerMultiplier, 3.0)
+        self.assertEqual(self.r.core.powerMultiplier, 3.0)
         self.assertFalse(self.r.core.isFullCore)
         self.r.core.growToFullCore(self.o.cs)
         aNums = []
@@ -193,7 +195,7 @@ class ReactorTests(_ReactorTests):
         bNames = [b.getName() for b in self.r.core.getBlocks()]
         for bName in bNames:
             self.assertEqual(bNames.count(bName), 1)
-        self.assertEqual(self.r.core.p.powerMultiplier, 1.0)
+        self.assertEqual(self.r.core.powerMultiplier, 1.0)
         self.assertTrue(self.r.core.isFullCore)
         nAssemFull = len(self.r.core)
         self.assertEqual(nAssemFull, (nAssemThird - 1) * 3 + 1)
@@ -369,18 +371,14 @@ class ReactorTests(_ReactorTests):
 
         for b2, b3 in zip(r2.core.getBlocks(), self.r.core.getBlocks()):
             for element in self.r.blueprints.elementsToExpand:
-                mass2 = b2.getMass(
-                    element.symbol
-                )  # nucspec allows elemental mass to be computed
+                # nucspec allows elemental mass to be computed
+                mass2 = b2.getMass(element.symbol)
                 mass3 = b3.getMass(element.symbol)
                 assert_allclose(mass2, mass3)
 
-                # check constituents
                 constituentNucs = [nn.name for nn in element.nuclideBases if nn.a > 0]
-                constituentMass2 = b2.getMass(constituentNucs)
-                constituentMass3 = b3.getMass(constituentNucs)
-                self.assertEqual(constituentMass2, 0.0)
-                assert_allclose(mass3, constituentMass3)
+                nuclideLevelMass3 = b3.getMass(constituentNucs)
+                assert_allclose(mass3, nuclideLevelMass3)
 
     def test_getDominantMaterial(self):
         dominantDuct = self.r.core.getDominantMaterial(Flags.DUCT)

@@ -23,18 +23,18 @@ from armi.nucDirectory import nucDir, nuclideBases
 from armi.nuclearDataIO import isotxs
 
 from armi.reactor import components
-from armi.reactor.components.shapes import UnshapedVolumetricComponent
 from armi.reactor import composites
 from armi.reactor import batch
 from armi.reactor import blocks
 from armi.reactor import assemblies
 from armi.reactor.components import shapes
+from armi.reactor.components import basicShapes
+from armi.reactor.components.shapes import UnshapedVolumetricComponent
 from armi.materials import custom
 from armi.reactor import locations
 from armi.reactor import grids
 from armi.reactor.blueprints import assemblyBlueprint
 from armi.reactor import parameters
-from armi.reactor.components import basicShapes
 from armi.reactor.flags import Flags
 
 from armi.physics.neutronics.fissionProductModel.tests import test_lumpedFissionProduct
@@ -48,17 +48,14 @@ class MockBP:
     activeNuclides = allNuclidesInProblem
     inactiveNuclides = set()
     elementsToExpand = set()
+    customIsotopics = {}
 
 
 def getDummyParamDefs():
     dummyDefs = parameters.ParameterDefinitionCollection()
     with dummyDefs.createBuilder() as pb:
 
-        def type(self, value):
-            self._p_type = value
-            self._p_flags = Flags.fromStringIgnoreErrors(value)
-
-        pb.defParam("type", units="none", description="Fake type", setter=type)
+        pb.defParam("type", units="none", description="Fake type")
     return dummyDefs
 
 
@@ -163,23 +160,23 @@ class TestCompositePattern(unittest.TestCase):
         )
 
     def test_hasFlags(self):
-        self.container.p.type = "fuel"
+        self.container.setType("fuel")
         self.assertFalse(self.container.hasFlags(Flags.SHIELD | Flags.FUEL, exact=True))
         self.assertTrue(self.container.hasFlags(Flags.FUEL))
         self.assertTrue(self.container.hasFlags(None))
 
     def test_hasFlagsSubstring(self):
         """Make sure typespecs with the same word in them no longer match."""
-        self.container.p.type = "intercoolant"
+        self.container.setType("intercoolant")
         self.assertFalse(self.container.hasFlags(Flags.COOLANT))
         self.assertFalse(self.container.hasFlags(Flags.COOLANT, exact=True))
         self.assertTrue(self.container.hasFlags(Flags.INTERCOOLANT, exact=True))
 
-        self.container.p.type = "innerduct"
+        self.container.setType("innerduct")
         self.assertFalse(self.container.hasFlags(Flags.DUCT, exact=True))
 
     def test_hasFlagsNoTypeSpecified(self):
-        self.container.p.type = "fuel"
+        self.container.setType("fuel")
         types = [None, [], [None]]
         for t in types:
             self.assertTrue(self.container.hasFlags(t))
@@ -685,6 +682,40 @@ class TestBatchMethodsOnArmiObjectAndCompositeObject(unittest.TestCase):
                             type(armiObject)
                         )
                     )
+
+
+class TestFlagSerializer(unittest.TestCase):
+    def test_flagSerialization(self):
+        data = [
+            Flags.FUEL,
+            Flags.FUEL | Flags.DEPLETABLE,
+            Flags.A | Flags.B | Flags.CONTROL,
+        ]
+
+        flagsArray, attrs = composites.FlagSerializer.pack(data)
+
+        data2 = composites.FlagSerializer.unpack(
+            flagsArray, composites.FlagSerializer.version, attrs
+        )
+        self.assertEqual(data, data2)
+
+        # discrepant versions
+        with self.assertRaises(ValueError):
+            data2 = composites.FlagSerializer.unpack(flagsArray, "0", attrs)
+
+        # wrong number of Flags
+        removedFlag = attrs["flag_order"].pop()
+        with self.assertRaises(ValueError):
+            data2 = composites.FlagSerializer.unpack(
+                flagsArray, composites.FlagSerializer.version, attrs
+            )
+
+        # Flags order doesn't match anymore
+        attrs["flag_order"].insert(0, removedFlag)
+        with self.assertRaises(ValueError):
+            data2 = composites.FlagSerializer.unpack(
+                flagsArray, composites.FlagSerializer.version, attrs
+            )
 
 
 if __name__ == "__main__":

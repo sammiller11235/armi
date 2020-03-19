@@ -139,17 +139,19 @@ class ComponentBlueprint(yamlize.Object):
     Tinput = yamlize.Attribute(type=float)
     Thot = yamlize.Attribute(type=float)
     isotopics = yamlize.Attribute(type=str, default=None)
-    centers = yamlize.Attribute(type=str, default=None)
+    latticeIDs = yamlize.Attribute(type=list, default=None)
+    origin = yamlize.Attribute(type=list, default=None)
     orientation = yamlize.Attribute(type=str, default=None)
     mergeWith = yamlize.Attribute(type=str, default=None)
+    area = yamlize.Attribute(type=float, default=None)
 
     def construct(self, blueprint, matMods):
         """Construct a component"""
         runLog.debug("Constructing component {}".format(self.name))
-        kwargs, appliedMatMods = self._conformKwargs(blueprint, matMods)
+        kwargs = self._conformKwargs(blueprint, matMods)
         component = components.factory(self.shape.strip().lower(), [], kwargs)
         _insertDepletableNuclideKeys(component, blueprint)
-        return component, appliedMatMods
+        return component
 
     def _conformKwargs(self, blueprint, matMods):
         """This method gets the relevant kwargs to construct the component"""
@@ -162,7 +164,11 @@ class ComponentBlueprint(yamlize.Object):
                 continue
             elif attr.name == "material":
                 # value is a material instance
-                value, appliedMatMods = self._constructMaterial(blueprint, matMods)
+                value = self._constructMaterial(blueprint, matMods)
+            elif attr.name == "latticeIDs":
+                # Don't pass latticeIDs on to the component constructor.
+                # They're applied during block construction.
+                continue
             else:
                 value = attr.get_value(self)
 
@@ -173,45 +179,79 @@ class ComponentBlueprint(yamlize.Object):
 
             kwargs[attr.name] = value
 
-        return kwargs, appliedMatMods
+        return kwargs
 
     def _constructMaterial(self, blueprint, matMods):
         nucsInProblem = blueprint.allNuclidesInProblem
-        mat = materials.resolveMaterialClassByName(
-            self.material
-        )()  # make material with defaults
+        # make material with defaults
+        mat = materials.resolveMaterialClassByName(self.material)()
 
         if self.isotopics is not None:
+            # Apply custom isotopics before processing input mods so
+            # the input mods have the final word
             blueprint.customIsotopics.apply(mat, self.isotopics)
 
-        appliedMatMods = False
-        if any(matMods):
+        # add mass fraction custom isotopics info, since some material modifications need to see them
+        # e.g. in the base Material.applyInputParams
+        matMods.update(
+            {
+                "customIsotopics": {
+                    k: v.massFracs for k, v in blueprint.customIsotopics.items()
+                }
+            }
+        )
+        if len(matMods) > 1:
+            # don't apply if only customIsotopics is in there
             try:
-                mat.applyInputParams(
-                    **matMods
-                )  # update material with updated input params from YAML file.
-                appliedMatMods = True
+                # update material with updated input params from blueprints file.
+                mat.applyInputParams(**matMods)
             except TypeError:
                 # This component does not accept material modification inputs of the names passed in
                 # Keep going since the modification could work for another component
                 pass
 
-        # expand elementals
-        densityTools.expandElementalMassFracsToNuclides(
-            mat.p.massFrac, blueprint.elementsToExpand
-        )
+        expandElementals(mat, blueprint)
 
         missing = set(mat.p.massFrac.keys()).difference(nucsInProblem)
 
         if missing:
             raise exceptions.ConsistencyError(
                 "The nuclides {} are present in material {} by compositions, but are not "
-                "specified in the input file. They need to be added.".format(
+                "specified in the `nuclide flags` section of the input file. "
+                "They need to be added, or custom isotopics need to be applied.".format(
                     missing, mat
                 )
             )
 
-        return mat, appliedMatMods
+        return mat
+
+
+def expandElementals(mat, blueprint):
+    """
+    Expand elements to isotopics during material construction.
+
+    Does so as required by modeling options or user input.
+
+    See Also
+    --------
+    armi.reactor.blueprints.Blueprints._resolveNuclides
+        Sets the metadata defining this behavior.
+    """
+    elementExpansionPairs = []
+    for elementToExpand in blueprint.elementsToExpand:
+        if elementToExpand.symbol not in mat.p.massFrac:
+            continue
+        nucFlags = blueprint.nuclideFlags.get(elementToExpand.symbol)
+        nuclidesToBecome = (
+            [nuclideBases.byName[nn] for nn in nucFlags.expandTo]
+            if (nucFlags and nucFlags.expandTo)
+            else None
+        )
+        elementExpansionPairs.append((elementToExpand, nuclidesToBecome))
+
+    densityTools.expandElementalMassFracsToNuclides(
+        mat.p.massFrac, elementExpansionPairs
+    )
 
 
 def _insertDepletableNuclideKeys(c, blueprint):

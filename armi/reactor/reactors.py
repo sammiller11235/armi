@@ -28,8 +28,9 @@ import itertools
 import math
 import re
 import os
-import time
 import tabulate
+import time
+from typing import Optional
 
 from six import moves
 import numpy
@@ -55,6 +56,7 @@ from armi import materials
 from armi import utils
 from armi.utils import units
 from armi.utils.iterables import Sequence
+from armi.utils import directoryChangers
 from armi.reactor.flags import Flags
 from armi.settings.fwSettings.globalSettings import CONF_MATERIAL_NAMESPACE_ORDER
 
@@ -71,8 +73,8 @@ class Reactor(composites.Composite):
 
     pDefs = reactorParameters.defineReactorParameters()
 
-    def __init__(self, cs, blueprints):
-        composites.Composite.__init__(self, "R-{}".format(cs.caseTitle))
+    def __init__(self, name, blueprints):
+        composites.Composite.__init__(self, "R-{}".format(name))
 
         self.o = None
         self.spatialGrid = None
@@ -122,30 +124,29 @@ def loadFromCs(cs):
     return factory(cs, bp)
 
 
-def factory(cs, blueprints, geom=None):
+def factory(cs, bp, geom: Optional[geometry.SystemLayoutInput] = None):
     """
     Build a reactor from input settings, blueprints and geometry.
     """
-    from armi.reactor.blueprints import reactorBlueprint  # circular import protection
-    from armi.utils import directoryChangers
+    from armi.reactor import blueprints
 
     runLog.header("=========== Constructing Reactor and Verifying Inputs ===========")
     # just before reactor construction, update the material "registry" with user settings,
     # if it is set. Often it is set by the application.
     if cs[CONF_MATERIAL_NAMESPACE_ORDER]:
         materials.setMaterialNamespaceOrder(cs[CONF_MATERIAL_NAMESPACE_ORDER])
-    r = Reactor(cs, blueprints)
+    r = Reactor(cs.caseTitle, bp)
 
     if cs["geomFile"]:
-        reactorBlueprint.migrate(blueprints, cs)
+        blueprints.migrate(bp, cs)
 
-    with directoryChangers.DirectoryChanger(cs.inputDirectory):
+    with directoryChangers.DirectoryChanger(cs.inputDirectory, dumpOnException=False):
         # always construct the core first (for assembly serial number purposes)
-        core = blueprints.systemDesigns["core"]
-        core.construct(cs, blueprints, r, geom=geom)
-        for structure in blueprints.systemDesigns:
+        core = bp.systemDesigns["core"]
+        core.construct(cs, bp, r, geom=geom)
+        for structure in bp.systemDesigns:
             if structure.name.lower() != "core":
-                structure.construct(cs, blueprints, r)
+                structure.construct(cs, bp, r)
 
     runLog.debug("Reactor: {}".format(r))
     return r
@@ -173,7 +174,7 @@ class Core(composites.Composite):
 
     pDefs = reactorParameters.defineCoreParameters()
 
-    def __init__(self, name, cs, geom):
+    def __init__(self, name):
         """
         Initialize the reactor object.
 
@@ -188,10 +189,6 @@ class Core(composites.Composite):
         """
         composites.Composite.__init__(self, name)
         self.p.flags = Flags.fromStringIgnoreErrors(name)
-        self.geom = geom
-        self.p.geomType = geom.geomType
-        self.symmetry = geom.symmetry
-        self.assembliesRemovedThisCycle = []  # temporary bookkeeping for BR estimates
         self.assembliesByName = {}
         self.circularRingList = {}
         self.blocksByName = {}  # lookup tables
@@ -209,11 +206,9 @@ class Core(composites.Composite):
         self.sfp = assemblyLists.SpentFuelPool("Spent Fuel Pool", self)
         self.cfp = assemblyLists.ChargedFuelPool("Charged Fuel Pool", self)
         self._lib = None  # placeholder for ISOTXS object
-        self.p.jumpRing = cs["jumpRingNum"]
         self.locParams = {}  # location-based parameters
-        self.timeOfStart = (
-            time.time()
-        )  # overridden in case.py to include pre-reactor time.
+        # overridden in case.py to include pre-reactor time.
+        self.timeOfStart = time.time()
         self.zones = None
         # initialize the list that holds all shuffles
         self.moveList = {}
@@ -221,7 +216,17 @@ class Core(composites.Composite):
         self._nuclideCategories = {}
         self.typeList = []  # list of block types to convert name - to -number.
 
-        # these are really "user modifiable modeling constants" or something like that
+        # leftover default "settings" that are intended to eventually be elsewhere.
+        self._freshFeedType = "feed fuel"
+        self._trackAssems = False
+        self._circularRingMode = False
+        self._circularRingPitch = 1.0
+        self._automaticVariableMesh = False
+        self._minMeshSizeRatio = 0.15
+
+    def setOptionsFromCs(self, cs):
+        # these are really "user modifiable modeling constants"
+        self.p.jumpRing = cs["jumpRingNum"]
         self._freshFeedType = cs["freshFeedType"]
         self._trackAssems = cs["trackAssems"]
         self._circularRingMode = cs["circularRingMode"]
@@ -268,19 +273,30 @@ class Core(composites.Composite):
 
     @property
     def symmetry(self):
-        if self._symmetry != self.p.symmetry:
-            raise ValueError(
-                "Unstable state detected in {}: core.symmetry={}; core.p.symmetry={} "
-                "Core.p.symmetry should only be set through core.symmetry to ensure cache clearing. "
-                "Somehow Core.p.symmetry was set directly which does not clear the cache."
-                "".format(self, self._symmetry, self.p.symmetry)
-            )
-        return self._symmetry
+        return self.spatialGrid.symmetry
 
     @symmetry.setter
     def symmetry(self, val):
-        self.p.symmetry = self._symmetry = val
+        self.spatialGrid.symmetry = val
         self.clearCache()
+
+    @property
+    def geomType(self):
+        if not self.spatialGrid:
+            raise ValueError("Cannot access geomType before a spatialGrid is attached.")
+        return self.spatialGrid.geomType
+
+    @property
+    def powerMultiplier(self):
+        """
+        Symmetry factor for this model. 1 for full core, 3 for 1/3 core, etc.
+
+        Notes
+        -----
+        This should not be a state variable because it just reflects the current geometry.
+        It changes automatically if the symmetry changes (e.g. from a geometry conversion).
+        """
+        return geometry.SYMMETRY_FACTORS[self.symmetry]
 
     @property
     def lib(self):
@@ -299,7 +315,7 @@ class Core(composites.Composite):
     def isFullCore(self):
         """Return True if reactor is full core, otherwise False."""
         # Avoid using `not core.isFullCore` to check if third core geometry
-        # us `core.symmetry == geometry.THIRD_CORE + geometry.PERIODIC`
+        # use `core.symmetry == geometry.THIRD_CORE + geometry.PERIODIC`
         return self.symmetry == geometry.FULL_CORE
 
     @property
@@ -318,10 +334,10 @@ class Core(composites.Composite):
             fissileMass += block.getFissileMass()
             heavyMetalMass += block.getHMMass()
             totalVolume += block.getVolume()
-        totalMass = totalMass * self.p.powerMultiplier / 1000.0
-        fissileMass = fissileMass * self.p.powerMultiplier / 1000.0
-        heavyMetalMass = heavyMetalMass * self.p.powerMultiplier / 1000.0
-        totalVolume = totalVolume * self.p.powerMultiplier
+        totalMass = totalMass * self.powerMultiplier / 1000.0
+        fissileMass = fissileMass * self.powerMultiplier / 1000.0
+        heavyMetalMass = heavyMetalMass * self.powerMultiplier / 1000.0
+        totalVolume = totalVolume * self.powerMultiplier
         runLog.extra(
             "Summary of {}\n".format(self)
             + tabulate.tabulate(
@@ -385,7 +401,6 @@ class Core(composites.Composite):
         a1.p.dischargeTime = self.r.p.time
         self.remove(a1)
 
-        self.assembliesRemovedThisCycle.append(a1.getName())  # for tracking BR, etc.
         if discharge and self._trackAssems:
             self.sfp.add(a1)
         else:
@@ -419,10 +434,6 @@ class Core(composites.Composite):
                     label="cannot dereference: lost block",
                 )
 
-        for bookkeepingList in [self.assembliesRemovedThisCycle]:
-            if assembly.getName() in bookkeepingList:
-                bookkeepingList.remove(assembly.getName())
-
     def removeAllAssemblies(self, discharge=True):
         """
         Clears the core.
@@ -435,7 +446,6 @@ class Core(composites.Composite):
         assems = set(self)
         for a in assems:
             self.removeAssembly(a, discharge)
-        self.assembliesRemovedThisCycle = []
         self.cfp.removeAll()
         self.sfp.removeAll()
         self.blocksByName = {}
@@ -505,7 +515,7 @@ class Core(composites.Composite):
         for b in a:
             self.blocksByName[b.getName()] = b
 
-        if self.p.geomType == geometry.HEX:
+        if self.geomType == geometry.HEX:
             ring, _loc = self.spatialGrid.getRingPos(
                 a.spatialLocator.getCompleteIndices()
             )
@@ -585,7 +595,7 @@ class Core(composites.Composite):
             all outer assembly hex rings were "filled out".
 
         """
-        if self.p.powerMultiplier == 1:
+        if self.powerMultiplier == 1:
             return 3 * nRings * (nRings - 1) + 1
         else:
             return nRings * (nRings - 1) + (nRings + 1) // 2
@@ -624,7 +634,7 @@ class Core(composites.Composite):
         if not fullCore:
             return sum(1 for _a in assems)
 
-        pmult = self.p.powerMultiplier  # value is loop-independent
+        pmult = self.powerMultiplier  # value is loop-independent
 
         rings = (a.spatialLocator.getRingPos()[0] for a in assems)
 
@@ -797,7 +807,7 @@ class Core(composites.Composite):
 
         ## filter based on geomType
         if (
-            self.p.geomType == geometry.CARTESIAN
+            self.geomType == geometry.CARTESIAN
         ):  # a ring in cartesian is basically a square.
             assems.select(
                 lambda a: any(xy == ring for xy in abs(a.spatialLocator.indices[:2]))
@@ -840,7 +850,7 @@ class Core(composites.Composite):
 
         """
 
-        if self.p.geomType == geometry.CARTESIAN:
+        if self.geomType == geometry.CARTESIAN:
             # a ring in cartesian is basically a square.
             raise RuntimeError(
                 "A circular ring in cartesian coordinates has not been defined yet."
@@ -994,7 +1004,7 @@ class Core(composites.Composite):
         exact=False,
     ):
         """
-        Return an list of all the assemblies in the reactor.
+        Return a list of all the assemblies in the reactor.
 
         Assemblies from the Core itself are sorted based on the Assemblies' comparison
         operators (location-based). This is done so that two reactors with physically
@@ -1488,7 +1498,7 @@ class Core(composites.Composite):
         """
         Returns an assembly or none if given a location string like 'B0014'.
         """
-        loc = locations.locationFactory(self.p.geomType)()
+        loc = locations.locationFactory(self.geomType)()
         loc.fromLabel(locationString)
         i, j = loc.indices()
         assem = self.childrenByLocator.get(self.spatialGrid[i, j, 0])
@@ -1766,7 +1776,7 @@ class Core(composites.Composite):
 
         """
         a = self.parent.blueprints.constructAssem(
-            self.geom.geomType, cs or settings.getMasterCs(), name=assemType
+            self.geomType, cs or settings.getMasterCs(), name=assemType
         )
 
         # check to see if a default bol assembly is being used or we are adding more information
@@ -1797,7 +1807,7 @@ class Core(composites.Composite):
             self.cfp.add(a)
 
         self.p.numAssembliesFabricated += int(
-            self.p.powerMultiplier
+            self.powerMultiplier
         )  # in 1/3 symmetry you're creating 3 assems.
         return a
 
@@ -2688,14 +2698,14 @@ class Core(composites.Composite):
         # make sure to get one extra ring because when neighbors are searched for, it will look
         # for neighbors of the outer ring, which will look in ring+1.
         # don't worry though, whichASsemblyIsIn will return None for those guys.
-        if self.p.geomType == geometry.RZT:
+        if self.geomType == geometry.RZT:
             n1 = len(self.findAllAziMeshPoints())
             n2 = len(self.findAllRadMeshPoints())
             for i1 in range(1, n1):
                 for i2 in range(1, n2):
                     self.locationIndexLookup[i1, i2] = (i1, i2)
         else:
-            dumLocClass = locations.locationFactory(self.p.geomType)
+            dumLocClass = locations.locationFactory(self.geomType)
             dumLoc = dumLocClass()
             for ring in range(self.getNumRings(indexBased=True) + 1):
                 rebusRing = ring + 1
@@ -2944,20 +2954,6 @@ class Core(composites.Composite):
             default=0.0,
         )
 
-    def setBreedingRatio2(self, fcs):
-        fcs["eocFissile"] = self.getTotalBlockParam("kgFis")
-        fissileBurned = fcs["eocFissile"] - fcs["bocFissile"]
-        assemblies = [
-            self.getAssemblyByName(an) for an in self.assembliesRemovedThisCycle
-        ]
-        fcs["dischargedFissile"] = self.getTotalBlockParam("kgFis", assemblies)
-        if fcs["dischargedFissile"]:
-            self.p.breedingRatio2 = (fissileBurned + fcs["dischargedFissile"]) / fcs[
-                "dischargedFissile"
-            ]
-        else:
-            self.p.breedingRatio2 = 0.0
-
     def getFuelBottomHeight(self):
         r"""
         Obtain the height of the lowest fuel in the core.
@@ -3024,7 +3020,6 @@ class Core(composites.Composite):
                 # prepare for mesh snapping during axial expansion
                 a.makeAxialSnapList(self.refAssem)
 
-        self._checkGeomCompleteness()
         self.numRings = self.getNumRings()  # TODO: why needed?
         self._buildLocationIndexLookup()  # for converting indices to locations.
 
@@ -3049,20 +3044,3 @@ class Core(composites.Composite):
         self.p.maxAssemNum = self.getMaxParam("assemNum")
 
         armi.getPluginManagerOrFail().hook.onProcessCoreLoading(core=self, cs=cs)
-
-    def _checkGeomCompleteness(self):
-        r"""issues a warning of something seems wrong with geometry (helps debugging)"""
-        for ring in range(self.numRings):
-            ringNum = ring + 1
-            aList = self.getAssembliesInRing(ringNum)
-            aLen = len(aList)
-            runLog.debug("Assembles in ring {0} - {1}".format(ringNum, aList))
-            if aLen:
-                lLen = len(self.spatialGrid.allPositionsInThird(ringNum)) * (
-                    1 + 2 * (self.isFullCore and ringNum > 1)
-                )
-                if aLen != (lLen):
-                    runLog.debug(
-                        "Questionable Completeness. Ring {0} has {1} positions and {2} "
-                        "assemblies".format(ringNum, lLen, aLen)
-                    )

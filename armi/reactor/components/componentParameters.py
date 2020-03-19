@@ -46,18 +46,10 @@ def getComponentParameterDefinitions():
             description="Label of other component to merge with",
         )
 
-        def type(self, value):  # pylint: disable=method-hidden
-            """Always set flags when type changes."""
-            self._p_type = value  # pylint: disable=attribute-defined-outside-init
-            self._p_flags = Flags.fromStringIgnoreErrors(
-                value
-            )  # pylint: disable=attribute-defined-outside-init
-
         pb.defParam(
             "type",
             units="",
             description="The name of this object as input on the blueprints",
-            setter=type,
         )
 
         pb.defParam(
@@ -77,6 +69,13 @@ def getComponentParameterDefinitions():
             units="%FIMA",
             description="Burnup as a percentage of initial (heavy) metal atoms.",
             default=0.0,
+        )
+
+        pb.defParam(
+            "massHmBOL",
+            units="grams",
+            description="Mass of heavy metal at BOL",
+            default=None,
         )
 
         pb.defParam(
@@ -225,7 +224,7 @@ def getTriangleParameterDefinitions():
 
 
 def getUnshapedParameterDefinitions():
-    """Return paramters for UnshapedComponent."""
+    """Return parameters for UnshapedComponent."""
 
     pDefs = parameters.ParameterDefinitionCollection()
     with pDefs.createBuilder(location=ParamLocation.AVERAGE, saveToDB=True) as pb:

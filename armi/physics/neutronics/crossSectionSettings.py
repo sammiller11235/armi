@@ -64,11 +64,11 @@ SINGLE_XS_SCHEMA = vol.Schema(
         vol.Optional(CONF_BLOCKTYPES): [str],
         vol.Optional(CONF_HOMOGBLOCK): bool,
         vol.Optional(CONF_EXTERNAL_DRIVER, default=True): bool,
-        vol.Optional(CONF_INTERNAL_RINGS): int,
-        vol.Optional(CONF_EXTERNAL_RINGS): int,
+        vol.Optional(CONF_INTERNAL_RINGS): vol.Coerce(int),
+        vol.Optional(CONF_EXTERNAL_RINGS): vol.Coerce(int),
         vol.Optional(CONF_MERGE_INTO_CLAD): [str],
         vol.Optional(CONF_FILE_LOCATION): [str],
-        vol.Optional(CONF_MESH_PER_CM): int,
+        vol.Optional(CONF_MESH_PER_CM): vol.Coerce(float),
     }
 )
 
@@ -210,15 +210,38 @@ class XSSettingDef(Setting):
         We massage the data on its way out for user convenience, leaving None values out
         and leaving the special ``xsID`` value out.
         """
+        output = self._serialize(self._value)
+        output = XS_SCHEMA(output)  # validate on the way out too
+        return output
+
+    def setValue(self, val):
+        """
+        Set value of setting to val.
+        
+        Since this is a custom serializable setting, we allow users
+        to pass in either a ``XSModelingOptions`` object itself
+        or a dictionary representation of one. 
+        """
+        try:
+            if isinstance(list(val.values())[0], XSModelingOptions):
+                val = self._serialize(val)
+        except TypeError:
+            # value is not a dict, may be a CommentedMapValuesView or related; serialization
+            # not required
+            pass
+
+        Setting.setValue(self, val)
+
+    @staticmethod
+    def _serialize(value):
         output = {}
-        for xsID, val in self._value.items():
+        for xsID, val in value.items():
             xsIDVals = {
                 config: confVal
                 for config, confVal in val.__dict__.items()
                 if config != "xsID" and confVal is not None
             }
             output[xsID] = xsIDVals
-        output = XS_SCHEMA(output)  # validate on the way out too
         return output
 
 

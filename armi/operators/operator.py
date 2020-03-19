@@ -104,6 +104,9 @@ class Operator:  # pylint: disable=too-many-public-methods
         self.powerFractions = self._getPowerFractions()
         self._checkReactorCycleAttrs()
 
+        # Create the welcome headers for the case (case, input, machine, and some basic reactor information)
+        reportingUtils.writeWelcomeHeaders(self, cs)
+
     def _getCycleLengths(self):
         """Return the cycle length for each cycle of the system as a list."""
         return utils.expandRepeatedFloats(self.cs["cycleLengths"]) or (
@@ -137,6 +140,17 @@ class Operator:  # pylint: disable=too-many-public-methods
                         name, self.cs["nCycles"], len(param), param
                     )
                 )
+
+    @property
+    def atEOL(self):
+        """
+        Return whether we are approaching EOL.
+
+        For the standard operator, this will return true when the current cycle
+        is the last cycle (cs["nCycles"] - 1). Other operators may need to
+        impose different logic.
+        """
+        return self.r.p.cycle == self.cs["nCycles"] - 1
 
     def initializeInterfaces(self, r):
         """
@@ -690,7 +704,7 @@ class Operator:  # pylint: disable=too-many-public-methods
         """
         return self.interfaces[:]
 
-    def reattach(self, r, cs):
+    def reattach(self, r, cs=None):
         """Add links to globally-shared objects to this operator and all interfaces.
 
         Notes
@@ -699,11 +713,13 @@ class Operator:  # pylint: disable=too-many-public-methods
         """
         self.r = r
         self.r.o = self
-        self.cs = cs
+        if cs is not None:
+            self.cs = cs
         for i in self.interfaces:
             i.r = r
             i.o = self
-            i.cs = cs
+            if cs is not None:
+                i.cs = cs
 
     def detach(self):
         """
@@ -804,7 +820,22 @@ class Operator:  # pylint: disable=too-many-public-methods
     def loadState(
         self, cycle, timeNode, timeStepName="", fileName=None, updateMassFractions=None
     ):
-        """Convenience method reroute to the database interface state reload method"""
+        """
+        Convenience method reroute to the database interface state reload method
+
+        See also
+        --------
+        armi.bookeeping.db.loadOperator:
+            A method for loading an operator given a database. loadOperator does not
+            require an operator prior to loading the state of the reactor. loadState
+            does, and therefore armi.init must be called which requires access to the
+            blueprints, settings, and geometry files. These files are stored implicitly
+            on the database, so loadOperator creates the reactor first, and then attaches
+            it to the operator. loadState should be used if you are in the middle
+            of an ARMI calculation and need load a different time step. If you are
+            loading from a fresh ARMI session, either method is sufficient if you have
+            access to all the input files.
+        """
         dbi = self.getInterface("database")
         if not dbi:
             raise RuntimeError("Cannot load from snapshot without a database interface")
@@ -846,18 +877,6 @@ class Operator:  # pylint: disable=too-many-public-methods
             )
         else:
             os.mkdir(newFolder)
-
-        inf = "{0}{1:03d}{2:03d}.inp".format(self.cs.caseTitle, cycle, node)
-        writer = self.getInterface("dif3d")
-
-        if not writer:
-            writer = self.getInterface("rebus")
-        if not writer:
-            runLog.warning(
-                "There are no interface attached that can write a snapshot input"
-            )
-        else:
-            writer.writeInput(os.path.join(newFolder, inf))
 
         # copy the cross section inputs
         for fileName in os.listdir("."):

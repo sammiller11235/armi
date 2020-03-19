@@ -80,7 +80,15 @@ True
 [<component fuel1>, <component fuel2>, ...]
 
 """
+from typing import Optional, Sequence, Union
+
 from armi.utils.flags import Flag, auto
+
+
+# Type alias used for passing type specifications to many of the composite methods. See
+# Composite::hasFlags() to understand the semantics for how TypeSpecs are interpreted.
+# Anything that interprets a TypeSpec should apply the same semantics.
+TypeSpec = Optional[Union[Flag, Sequence[Flag]]]
 
 
 def __fromStringGeneral(cls, typeSpec, updateMethod):
@@ -169,6 +177,9 @@ class Flags(Flag):
     C = auto()
     D = auto()
     E = auto()
+    HIGH = auto()
+    MEDIUM = auto()
+    LOW = auto()
 
     CORE = auto()
     REACTOR = auto()
@@ -193,6 +204,7 @@ class Flags(Flag):
     BLANKET = auto()
     BOOSTER = auto()
     TARGET = auto()
+    MOX = auto()
 
     # radial positions
     INNER = auto()
@@ -223,7 +235,10 @@ class Flags(Flag):
     SKID = auto()
     VOID = auto()
     INTERDUCTCOOLANT = auto()
-    DSPACERINSIDE = auto()  # for dodecaducts
+    DSPACERINSIDE = auto()
+    GUIDE_TUBE = auto()
+    FISSION_CHAMBER = auto()
+    MODERATOR = auto()
 
     # more parts
     CORE_BARREL = auto()
@@ -268,7 +283,7 @@ def registerPluginFlags(pm):
     global _PLUGIN_FLAGS_REGISTERED
     if _PLUGIN_FLAGS_REGISTERED:
         raise RuntimeError(
-            "Plugin flags have already been registered. Cannot do it " "twice!"
+            "Plugin flags have already been registered. Cannot do it twice!"
         )
 
     for pluginFlags in pm.hook.defineFlags():
@@ -283,6 +298,8 @@ CONVERSIONS = {
     "INLET NOZZLE": Flags.INLET_NOZZLE,
     "NOZZLE": Flags.INLET_NOZZLE,
     "HANDLING SOCKET": Flags.HANDLING_SOCKET,
+    "GUIDE TUBE": Flags.GUIDE_TUBE,
+    "FISSION CHAMBER": Flags.FISSION_CHAMBER,
     "SOCKET": Flags.HANDLING_SOCKET,
     "SHIELD BLOCK": Flags.SHIELD_BLOCK,
     "SHIELDBLOCK": Flags.SHIELD_BLOCK,

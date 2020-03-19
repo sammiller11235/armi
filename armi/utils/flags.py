@@ -27,6 +27,7 @@ provides most of the safety and functionality.
 There is an `issue <https://bitbucket.org/stoneleaf/aenum/issues/27/>`_ on the ``aenum``
 bitbucket site to track ``Flag`` extension.
 """
+import math
 
 from typing import Dict, Union, Sequence, List, Tuple
 
@@ -83,6 +84,7 @@ class _FlagMeta(type):
         flagClass._nameToValue = allFields
         flagClass._valuesTaken = set(val for _, val in allFields.items())
         flagClass._autoAt = autoAt
+        flagClass._width = math.ceil(len(flagClass._nameToValue) / 8)
 
         # Replace the original class attributes with instances of the class itself.
         for name, value in allFields.items():
@@ -116,15 +118,16 @@ class Flag(metaclass=_FlagMeta):
         practically unlimited number of fields. *However*, including more flags than can
         be represented in the system-native integer types may lead to strange behavior
         when interfacing with non-pure Python code. For instance, exceeding 64 fields
-        makes the underlying value not trivially-storable in an HDF5 file. If we ever
-        want to store flags in an HDF5 file, we will need to develop some method of
-        encoding these when they are too wide.
+        makes the underlying value not trivially-storable in an HDF5 file. In such
+        circumstances, the ``from_bytes()`` and ``to_bytes()`` methods are available to
+        represent a Flag's values in smaller chunks.
     """
 
     # for pylint. Set by metaclass
-    _autoAt = 0
+    _autoAt = None
     _nameToValue = dict()
     _valuesTaken = set()
+    _width = None
 
     def __init__(self, init=0):
         self._value = int(init)
@@ -161,6 +164,7 @@ class Flag(metaclass=_FlagMeta):
         assert value not in cls._nameToValue
         cls._valuesTaken.add(value)
         cls._nameToValue[name] = value
+        cls._width = math.ceil(len(cls._nameToValue) / 8)
         instance = cls(value)
         setattr(cls, name, instance)
 
@@ -178,6 +182,27 @@ class Flag(metaclass=_FlagMeta):
             resolved.append((field, value))
             cls._autoAt *= 2
         return resolved
+
+    @classmethod
+    def width(cls):
+        """
+        Return the number of bytes needed to store all of the flags on this class.
+        """
+        return cls._width
+
+    @classmethod
+    def fields(cls):
+        """
+        Return a dictionary containing a mapping from field name to integer value.
+        """
+        return cls._nameToValue
+
+    @classmethod
+    def sortedFields(cls):
+        """
+        Return a list of all field names, sorted by increasing integer value.
+        """
+        return [i[0] for i in sorted(cls._nameToValue.items(), key=lambda item: item[1])]
 
     @classmethod
     def extend(cls, fields: Dict[str, Union[int, auto]]):
@@ -214,6 +239,27 @@ class Flag(metaclass=_FlagMeta):
         for field, value in resolved:
             cls._registerField(field, value)
 
+    def to_bytes(self, byteorder="little"):
+        """
+        Return a byte stream representing the flag.
+
+        This is useful when storing Flags in a data type of limited size. Python ints
+        can be of arbitrary size, while most other systems can only represent integers
+        of 32 or 64 bits. For compatibiliy, this function allows to convert the flags to
+        a sequence of single-byte elements.
+
+        Note that this uses snake_case to mimic the method on the Python-native int
+        type.
+        """
+        return self._value.to_bytes(self.width(), byteorder=byteorder)
+
+    @classmethod
+    def from_bytes(cls, bytes, byteorder="little"):
+        """
+        Return a Flags instance given a byte stream.
+        """
+        return cls(int.from_bytes(bytes, byteorder=byteorder))
+
     def __int__(self):
         return self._value
 
@@ -232,15 +278,15 @@ class Flag(metaclass=_FlagMeta):
 
         Note
         ----
-        This is avoiding just ~ on the ``_value`` because it might not be safe.
-        Using the int directly is slightly dangerous in that python ints are not of
-        fixed width, so the result of inverting one Flag might not be as wide as the
-        result of inverting another Flag. Typically, one would want to invert a Flag to
-        create a mask for unsetting a bit on another Flag, like ``f1 &= ~f2``. If ``f2`` is
-        narrower than ``f1`` the field of ones that you need to keep ``f1`` bits on might
-        not cover the width of ``f1``, erroneously turning off its upper bits. Not sure if
-        this was an issue before or not. Once things are working, might make sense to
-        play with this more.
+        This is avoiding just ~ on the ``_value`` because it might not be safe.  Using
+        the int directly is slightly dangerous in that python ints are not of fixed
+        width, so the result of inverting one Flag might not be as wide as the result of
+        inverting another Flag. Typically, one would want to invert a Flag to create a
+        mask for unsetting a bit on another Flag, like ``f1 &= ~f2``. If ``f2`` is
+        narrower than ``f1`` the field of ones that you need to keep ``f1`` bits on
+        might not cover the width of ``f1``, erroneously turning off its upper bits. Not
+        sure if this was an issue before or not. Once things are working, might make
+        sense to play with this more.
         """
         new = self._value
         for name, val in self._nameToValue.items():

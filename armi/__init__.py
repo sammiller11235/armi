@@ -153,19 +153,20 @@ def cleanTempDirs(olderThanDays=None):
     """
     Clean up temporary files after a run.
 
-    Parameters
-    ----------
-    olderThanDays: int, optional
-        If provided, deletes other ARMI directories if they are older than the requested
-        time.
-
     The Windows HPC system sends a SIGBREAK signal when the user cancels a job, which
     is NOT handled by ``atexit``. Notably SIGBREAK doesn't exist off Windows.
     For the SIGBREAK signal to work with a Microsoft HPC, the ``TaskCancelGracePeriod``
     option must be configured to be non-zero. This sets the period between SIGBREAK
     and SIGTERM/SIGINT. To do cleanups in this case, we must use the ``signal`` module.
     Actually, even then it does not work because MS ``mpiexec`` does not pass signals
-    through.  """
+    through.
+
+    Parameters
+    ----------
+    olderThanDays: int, optional
+        If provided, deletes other ARMI directories if they are older than the requested
+        time.
+    """
     disconnectAllHdfDBs()
 
     if os.path.exists(FAST_PATH):
@@ -288,11 +289,20 @@ def getDefaultPluginManager() -> pluggy.PluginManager:
     return pm
 
 
+def isConfigured():
+    """
+    Returns whether ARMI has been configured with an App.
+    """
+    return _app is not None
+
+
 def getPluginManager() -> Optional[pluggy.PluginManager]:
     """
     Return the plugin manager, if there is one.
     """
     global _app
+    if _app is None:
+        return None
     return _app.pluginManager
 
 
@@ -310,6 +320,11 @@ def getPluginManagerOrFail() -> pluggy.PluginManager:
     return _app.pluginManager
 
 
+def getApp() -> Optional[apps.App]:
+    global _app
+    return _app
+
+
 def _cleanupOnCancel(signum, _frame):
     """Helper function to clean up upon cancellation."""
     print(
@@ -323,9 +338,29 @@ def _cleanupOnCancel(signum, _frame):
     sys.exit(1)  # since we're handling the signal we have to cancel
 
 
-def configure(app: apps.App):
+def configure(app: Optional[apps.App]=None):
     """
     Set the plugin manager for the Framework and configure internals to those plugins.
+
+    Parameters
+    ----------
+    app :
+        An :py:class:`armi.apps.App` instance with which the framework is to be
+        configured. If it is not provided, then the default ARMI App will be used.
+
+    Important
+    ---------
+    Since this affects the behavior of several modules at their import time, it is
+    generally not safe to re-configure the ARMI framework once it has been configured.
+    Therefore this will raise an ``AssertionError`` if such a re-configuration is
+    attempted.
+
+    Notes
+    -----
+    We are planning on encapsulating much of the global ARMI state that gets configured
+    with an App into the App object itself (with some other things going into the Case
+    object). This will provide a number of benefits, the main one being that it will
+    become trivial to re-configure the framework, which is currently not possible.
     """
     assert not armi.context.BLUEPRINTS_IMPORTED, (
         "ARMI can no longer be configured after blueprints have been imported. "
@@ -333,6 +368,8 @@ def configure(app: apps.App):
             armi.context.BLUEPRINTS_IMPORT_CONTEXT
         )
     )
+
+    app = app or apps.App()
 
     global _app
     _app = app

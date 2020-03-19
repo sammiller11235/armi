@@ -417,6 +417,13 @@ def getBlockParameterDefinitions():
         )
 
         pb.defParam(
+            "massHmBOL",
+            units="grams",
+            description="Mass of heavy metal at BOL",
+            default=None,
+        )
+
+        pb.defParam(
             "molesHmBOLByPin",
             units="mole",
             description="Total number of atoms of heavy metal at BOL",
@@ -1007,20 +1014,6 @@ def getBlockParameterDefinitions():
 
         pb.defParam("bu", units="", description="?")
 
-        pb.defParam(
-            "gasReleaseFraction",
-            units="",
-            description="Fraction of fission gas to remove",
-            categories=["eq cumulative shift"],
-        )
-
-        pb.defParam(
-            "bondRemoved",
-            units="fraction",
-            description="Fraction of thermal bond between fuel and clad that has been pushed out.",
-            categories=["eq cumulative shift"],
-        )
-
         def buGroup(self, buGroupChar):  # pylint: disable=method-hidden
             if isinstance(buGroupChar, (int, float)):
                 intValue = int(buGroupChar)
@@ -1117,7 +1110,12 @@ def getBlockParameterDefinitions():
             description="Assembly displacement in the y direction",
         )
 
-        pb.defParam("fastFluence", units="#/cm^2", description="Fast spectrum fluence")
+        pb.defParam(
+            "fastFluence",
+            units="#/cm^2",
+            description="Fast spectrum fluence",
+            categories=["cumulative"],
+        )
 
         pb.defParam(
             "fastFluencePeak",
@@ -1126,7 +1124,9 @@ def getBlockParameterDefinitions():
             categories=["detailedAxialExpansion"],
         )
 
-        pb.defParam("fluence", units="#/cm^2", description="Fluence")
+        pb.defParam(
+            "fluence", units="#/cm^2", description="Fluence", categories=["cumulative"]
+        )
 
         pb.defParam(
             "flux",
@@ -1243,7 +1243,12 @@ def getBlockParameterDefinitions():
 
         pb.defParam("hydDiam", units="?", description="?", saveToDB=False)
 
-        pb.defParam("nHMAtBOL", units="?", description="?", saveToDB=False)
+        pb.defParam(
+            "nHMAtBOL",
+            units="atoms/bn-cm.",
+            description="Ndens of heavy metal at BOL",
+            saveToDB=False,
+        )
 
         pb.defParam(
             "z",
@@ -1293,14 +1298,6 @@ def getBlockParameterDefinitions():
             categories=[parameters.Category.retainOnReplacement],
         )
 
-        pb.defParam(
-            "axMesh",
-            units="",
-            description="number of neutronics axial mesh points in this block",
-            default=None,
-            categories=[parameters.Category.retainOnReplacement],
-        )
-
         def xsType(self, value):  # pylint: disable=method-hidden
             self._p_xsType = value  # pylint: disable=attribute-defined-outside-init
             self._p_xsTypeNum = crossSectionGroupManager.getXSTypeNumberFromLabel(
@@ -1333,20 +1330,12 @@ def getBlockParameterDefinitions():
             setter=xsTypeNum,
         )
 
-        def type(self, value):  # pylint: disable=method-hidden
-            """Always set flags when type changes."""
-            self._p_type = value  # pylint: disable=attribute-defined-outside-init
-            self._p_flags = Flags.fromStringIgnoreErrors(
-                value
-            )  # pylint: disable=attribute-defined-outside-init
-
         pb.defParam(
             "type",
             units="N/A",
             description="string name of the input block",
             default="defaultType",
             saveToDB=True,
-            setter=type,
         )
 
         pb.defParam(
@@ -1802,8 +1791,13 @@ def getBlockParameterDefinitions():
 
         pb.defParam(
             "assemNum",
-            units="?",
-            description="?",
+            units="None",
+            description="Index that refers, nominally, to the assemNum parameter of "
+            "the containing Assembly object. This is stored on the Block to aid in "
+            "visualizing shuffle patterns and the like, and should not be used within "
+            "the code. These are not guaranteed to be consistent with the containing "
+            "Assembly, so they should not be used as a reliable means to reconstruct "
+            "the model.",
             categories=[parameters.Category.retainOnReplacement],
         )
 

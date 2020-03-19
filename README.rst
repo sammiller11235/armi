@@ -1,4 +1,4 @@
-|Build Status|
+|Build Status| |Code Coverage|
 
 The Advanced Reactor Modeling Interface (ARMI\ :sup:`®`) software is a productivity tool
 written by engineers for nuclear reactor design and analysis.  It provides a digital
@@ -49,29 +49,32 @@ found in [#touranarmi]_.
    * - Bug tracker
      - https://github.com/terrapower/armi/issues
    * - Plugin directory
-     - (Coming soon)
+     - https://github.com/terrapower/armi-plugin-directory
    * - Contact
      - armi-devs@terrapower.com
 
 Quick start
 -----------
-Before starting, you need to have Python 3.6+ on Windows or Linux. On Linux,
-you will also need some MPI development libraries to install the ``mpi4py``
-library (e.g. ``sudo apt install libopenmpi-dev``)
+Before starting, you need to have `Python <https://www.python.org/downloads/>`_ 3.6+ on
+Windows or Linux.
 
-Get the ARMI code, install the prerequisites, and fire up the launcher with
-(you may want to do this in a virtual environment as described in the User
-manual)::
+Get the ARMI code, install the prerequisites, and fire up the launcher with the following
+commands. You probably want to do this in a virtual environment as described in the `User
+Guide <https://terrapower.github.io/armi/user/user_install.html>`_. Otherwise, the
+dependencies could conflict with your system dependencies.
+
+::
 
     $ git clone https://github.com/terrapower/armi
-    $ pip install -r requirements.txt
-    $ python setup.py install
+    $ cd armi
+    $ pip3 install -r requirements.txt
+    $ python3 setup.py install
     $ armi
 
 The easiest way to run the tests is to install `tox <https://tox.readthedocs.io/en/latest/>`_
 and then run::
 
-    $ pip install -r requirements-testing.txt
+    $ pip3 install -r requirements-testing.txt
     $ tox -- -n 6
 
 This runs the unit tests in parallel on 6 processes. Omit the ``-n 6`` argument
@@ -161,7 +164,7 @@ coupled to N other kernels. The ARMI Framework, depicted in green below, is the 
 of the open source package. Several skeletal analysis routines are included as well to
 perform basic data management and to help align efforts on external physics kernels.
 
-.. figure:: https://terrapower.github.io/armi/_images/armiSchematicView.png
+.. figure:: https://terrapower.github.io/armi/_static/armiSchematicView.png
    :figclass: align-center
 
    **Figure 1.** The schematic representation of the ARMI data model.
@@ -177,11 +180,12 @@ different modeling approximations (e.g. symmetries, transport vs. diffusion vs. 
 Carlo, subchannel vs. CFD, etc.).
 
 
-.. figure:: https://terrapower.github.io/armi/_images/armiGeometries.png
+.. figure:: https://terrapower.github.io/armi/_static/armiGeometries.png
    :figclass: align-center
 
    **Figure 2.** A variety of approximations in hexagonal geometry (1/3-core, full core, pin detailed, etc.) are shown,
-   all derived from one consistent input file.
+   all derived from one consistent input file. ARMI supports Cartesian, Hex, RZ, and RZTheta geometric grids
+   and includes many geometric components. Additionally, users can provide custom geometric elements.
 
 
 New analysis and physics capabilities
@@ -336,7 +340,8 @@ basically any kind of computer. We have developed it predominantly within a Micr
 Windows environment, but have performed tests under various flavors of Linux as well. It
 can perform meaningful analysis on a single laptop, but the full value of design
 optimization and large problems is realized with parallel runs over MPI with 32-128
-CPUs, or more. Serious engineering models can consume significant RAM, so at least 16 GB
+CPUs, or more (requires installation optional ``mpi4py`` library).
+Serious engineering models can consume significant RAM, so at least 16 GB
 is recommended.
 
 The original developer's HPC environment has been Windows based, so some development is
@@ -349,9 +354,9 @@ sodium-cooled TWR as the target, and are not necessarily yet optimized for other
 On the other hand, we have attempted to keep the framework general where possible, and
 many modules are broadly applicable to many reactors. We have run parts of ARMI on
 various SFRs (TWRs, FFTF, Joyo, Phenix), some fast critical assemblies (such as ZPPRs
-and BFS), molten salt reactors, and some thermal systems. Full support for the basic
-needs of thermal reactors (like a good spatial description of pin maps) is under
-development.
+and BFS), molten salt reactors, and some thermal systems. Support for the basic
+needs of thermal reactors (like a good spatial description of pin maps) exists but
+has not been subject to as much use.
 
 ARMI was developed within a rapidly changing R&D environment. It evolved accordingly,
 and naturally carries some legacy.  We continuously attempt to identify and update
@@ -399,3 +404,7 @@ The ARMI system is licensed as follows:
 
 .. |Build Status| image:: https://travis-ci.com/terrapower/armi.svg?branch=master
     :target: https://travis-ci.com/terrapower/armi
+
+.. |Code Coverage| image:: https://coveralls.io/repos/github/terrapower/armi/badge.svg?branch=master
+    :target: https://coveralls.io/github/terrapower/armi?branch=toxCov
+

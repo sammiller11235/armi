@@ -25,7 +25,6 @@ from armi import runLog
 from armi import settings
 from armi.utils import directoryChangers
 from armi.reactor import assemblies
-from armi.reactor import blueprints
 from armi.reactor import geometry
 from armi.reactor import reactors
 from armi.reactor import grids
@@ -37,16 +36,16 @@ ISOAA_PATH = os.path.join(TEST_ROOT, "ISOAA")
 COMPXS_PATH = os.path.join(TEST_ROOT, "COMPXS.ascii")
 
 
-def getEmptyHexReactor(cs=None):
+def getEmptyHexReactor():
     """Make an empty hex reactor used in some tests."""
-    cs = cs or settings.getMasterCs()
+    from armi.reactor import blueprints
+
     bp = blueprints.Blueprints()
-    geom = geometry.SystemLayoutInput()
-    geom.symmetry = geometry.THIRD_CORE + geometry.PERIODIC
-    geom.geomType = geometry.HEX
-    reactor = reactors.Reactor(cs, bp)
-    reactor.add(reactors.Core("Core", cs, geom))
+    reactor = reactors.Reactor("Reactor", bp)
+    reactor.add(reactors.Core("Core"))
     reactor.core.spatialGrid = grids.hexGridFromPitch(1.0)
+    reactor.core.spatialGrid.symmetry = geometry.THIRD_CORE + geometry.PERIODIC
+    reactor.core.spatialGrid.geomType = geometry.HEX
     reactor.core.spatialGrid.armiObject = reactor.core
     return reactor
 
@@ -212,8 +211,6 @@ class ArmiTestHelper(unittest.TestCase):
         Rebaselining the reference files upon large, expected, hand-verified changes is accomodated by
         :py:meth:`rebaselineTextComparisons`.
 
-
-
         Parameters
         ----------
         expectedFilePath: str
@@ -249,11 +246,11 @@ class ArmiTestHelper(unittest.TestCase):
                         for line in (actualLine, expectedLine)
                     ):
                         continue
-                    else:
-                        msg = "\nThe files: \n{} and \n{} \nwere not the same.".format(
-                            expectedFilePath, os.path.abspath(actualFilePath)
-                        )
-                        raise AssertionError(msg) from er
+
+                    msg = "\nThe files: \n{} and \n{} \nwere not the same.".format(
+                        expectedFilePath, os.path.abspath(actualFilePath)
+                    )
+                    raise AssertionError(msg) from er
         os.remove(actualFilePath)
 
 

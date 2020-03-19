@@ -206,6 +206,7 @@ from armi.reactor.parameters.parameterDefinitions import (
     SINCE_BACKUP,
     SINCE_ANYTHING,
     NEVER,
+    Serializer,
     Category,
     ParamLocation,
     NoDefault,
@@ -236,17 +237,3 @@ def reset():
     """
     for pd in ALL_DEFINITIONS:
         pd.assigned = NEVER
-
-
-# Note this should only have to be used as a setitem from stale databases. DON'T USE
-# ELSEWHERE!
-RENAMES = {
-    "SC0SigmaCladIDT": "TH0SigmaCladIDT",
-    "SC0SigmaCladODT": "TH0SigmaCladODT",
-    "SC2SigmaCladIDT": "TH2SigmaCladIDT",
-    "SC2SigmaCladODT": "TH2SigmaCladODT",
-    "SC2SigmaFuelCenterlineT": "TH2SigmaFuelCenterlineT",
-    "SC2SigmaOutletT": "TH2SigmaOutletT",
-    "SC3SigmaOutletT": "TH3SigmaOutletT",
-    "THmassFlow": "THmassFlowRate",
-}

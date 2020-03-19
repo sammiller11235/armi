@@ -30,7 +30,6 @@ from armi.bookkeeping import report
 from armi.localization import exceptions
 from armi.reactor import composites
 from armi.reactor import parameters
-from armi.reactor.parameters import resolveCollections
 from armi.reactor.components import componentParameters
 from armi.utils import densityTools
 from armi.utils.units import C_TO_K
@@ -107,21 +106,29 @@ class _DimensionLink(tuple):
     def __ne__(self, other):
         return not self.__eq__(other)
 
+    def __str__(self):
+        """Return a string representation of a dimension link.
+
+        These look like ``otherComponentName.otherDimensionName``.
+        For example, if a link were to a ``fuel`` component's
+        ``od`` param, the link would render as ``fuel.od``.
+        """
+        return f"{self[0].name}.{self[1]}"
+
 
 class ComponentType(composites.CompositeModelType):
     """
     ComponetType is a metaclass for storing and initializing Component subclass types.
 
-    The construction of Component subclasses is being done through factories for ease of user input.
-    As a consequence, the ``__init__`` methods' arguments need to be known in order to conform them
-    to the correct format. Additionally, the constructors arguments can be used to determine the
-    Component subclasses dimensions.
+    The construction of Component subclasses is being done through factories for ease of
+    user input.  As a consequence, the ``__init__`` methods' arguments need to be known
+    in order to conform them to the correct format. Additionally, the constructors
+    arguments can be used to determine the Component subclasses dimensions.
 
-    .. warning:: The import-time metaclass-based component subclass
-        registration was a good idea, but in practice has caused
-        significant confusion and trouble. We will replace this
-        soon with an explicit plugin-based component subclass
-        registration system.
+    .. warning:: The import-time metaclass-based component subclass registration was a
+        good idea, but in practice has caused significant confusion and trouble. We will
+        replace this soon with an explicit plugin-based component subclass registration
+        system.
     """
 
     TYPES = dict()
@@ -134,6 +141,7 @@ class ComponentType(composites.CompositeModelType):
         "material",
         "name",
         "components",
+        "area",
     )
 
     def __new__(cls, name, bases, attrs):
@@ -173,7 +181,6 @@ class Component(composites.Composite, metaclass=ComponentType):
         Temperature in C to which dimensions were thermally-expanded upon input.
     material : str or material.Material
         The material object that makes up this component and give it its thermo-mechanical properties.
-
     """
 
     DIMENSION_NAMES = tuple()  # will be assigned by ComponentType
@@ -205,7 +212,7 @@ class Component(composites.Composite, metaclass=ComponentType):
         material,
         Tinput,
         Thot,
-        area=numpy.NaN,
+        area=None,
         isotopics="",
         mergeWith="",
         components=None,
@@ -222,11 +229,10 @@ class Component(composites.Composite, metaclass=ComponentType):
         self.temperatureInC = Thot
         self.material = None
         self.setProperties(material)
-        self._applyNaturalNumberDensities()  # not necessary when duplicating...
+        self.applyMaterialMassFracsToNumberDensities()  # not necessary when duplicating...
         self.setType(name)
         self.p.mergeWith = mergeWith
         self.p.customIsotopicsName = isotopics
-        self.massHMBOL = 0.0  # in grams
 
     @property
     def temperatureInC(self):
@@ -298,15 +304,17 @@ class Component(composites.Composite, metaclass=ComponentType):
 
     def setProperties(self, properties):
         """Apply thermo-mechanical properties of a Material."""
-        self.material = (
-            materials.resolveMaterialClassByName(properties)()
-            if isinstance(properties, str)
-            else properties
-        )
+        if isinstance(properties, str):
+            mat = materials.resolveMaterialClassByName(properties)()
+            # note that the material will not be expanded to natural isotopics
+            # here because the user-input blueprints information is not available
+        else:
+            mat = properties
+        self.material = mat
         self.material.parent = self
         self.clearLinkedCache()
 
-    def _applyNaturalNumberDensities(self):
+    def applyMaterialMassFracsToNumberDensities(self):
         """
         Set initial (hot) number densities of this component based Material composition.
 
@@ -797,7 +805,8 @@ class Component(composites.Composite, metaclass=ComponentType):
                 {}
             )  # changes in dimensions can affect cached variables such as pitch
             for c in self.getLinkedComponents():
-                c.p.volume = None  # no clearCache since parent already updated derivedMustUpdate in self.clearCache()
+                # no clearCache since parent already updated derivedMustUpdate in self.clearCache()
+                c.p.volume = None
 
     def getLinkedComponents(self):
         """Find other components that are linked to this component."""

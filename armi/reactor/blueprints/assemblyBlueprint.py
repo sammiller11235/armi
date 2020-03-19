@@ -15,10 +15,12 @@
 """
 This module defines the blueprints input object for assemblies.
 
-In addition to defining the input format, the ``AssemblyBlueprint`` class is responsible for constructing ``Assembly``
-objects. An attempt has been made to decouple ``Assembly`` construction from the rest of ARMI as much as possible. For
-example, an assembly does not require a reactor to be constructed, or a geometry file (but uses ``geomType`` string as a
-surrogate).
+In addition to defining the input format, the ``AssemblyBlueprint`` class is responsible
+for constructing ``Assembly`` objects. An attempt has been made to decouple ``Assembly``
+construction from the rest of ARMI as much as possible. For example, an assembly does
+not require a reactor to be constructed, or a geometry file (but uses ``geomType``
+string as a surrogate).
+
 """
 import yamlize
 
@@ -60,6 +62,12 @@ class AssemblyBlueprint(yamlize.Object):
     blocks = yamlize.Attribute(type=blockBlueprint.BlockList)
     height = yamlize.Attribute(type=yamlize.FloatList)
     axialMeshPoints = yamlize.Attribute(key="axial mesh points", type=yamlize.IntList)
+    radialMeshPoints = yamlize.Attribute(
+        key="radial mesh points", type=int, default=None
+    )
+    azimuthalMeshPoints = yamlize.Attribute(
+        key="azimuthal mesh points", type=int, default=None
+    )
     materialModifications = yamlize.Attribute(
         key="material modifications", type=MaterialModifications, default=None
     )
@@ -116,7 +124,15 @@ class AssemblyBlueprint(yamlize.Object):
         a.spatialGrid = grids.axialUnitGrid(len(blocks))
         a.spatialGrid.armiObject = a
 
-        # loop a second time because we needed all the blocks before choosing the assembly class.
+        # TODO: Remove mesh points from blueprints entirely. Submeshing should be
+        # handled by specific physics interfaces
+        radMeshPoints = self.radialMeshPoints or 1
+        a.p.RadMesh = radMeshPoints
+        aziMeshPoints = self.azimuthalMeshPoints or 1
+        a.p.AziMesh = aziMeshPoints
+
+        # loop a second time because we needed all the blocks before choosing the
+        # assembly class.
         for axialIndex, block in enumerate(blocks):
             b.p.assemNum = a.p.assemNum
             b.name = b.makeName(a.p.assemNum, axialIndex)
@@ -147,9 +163,8 @@ class AssemblyBlueprint(yamlize.Object):
             cs, blueprint, axialIndex, meshPoints, height, xsType, materialInput
         )
 
-        # always just use B as the BOL block at this BOL point.
         # TODO: remove when the plugin system is fully set up?
-        b.completeInitialLoading(bolBlock=b)
+        b.completeInitialLoading()
         return b
 
     def _checkParamConsistency(self, a):

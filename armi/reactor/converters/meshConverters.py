@@ -21,17 +21,24 @@ import numpy
 
 from armi import runLog
 from armi.reactor import grids
-from armi.reactor.flags import Flags
+from armi.reactor.flags import Flags, TypeSpec
 
 
 class MeshConverter(object):
-    """Base class for the reactor mesh conversions."""
+    """
+    Base class for the reactor mesh conversions.
+    
+    Parameters
+    ----------
+    converterSettings : dict
+        A set of str, value settings used in mesh conversion. Required
+        settings are implementation specific.
+    """
 
-    def __init__(self, cs=None):
-        self._cs = cs
-        self._converterSettings = None
+    def __init__(self, converterSettings: dict):
+        self._converterSettings = converterSettings
 
-    def generateMesh(self, r=None, converterSettings=None):
+    def generateMesh(self, r=None):
         raise NotImplementedError
 
     def writeMeshData(self):
@@ -46,7 +53,7 @@ class RZThetaReactorMeshConverter(MeshConverter):
     ----------
     converterSettings: dict
         This is a dictionary of settings that are used for the RZThetaReactorMeshConverter.
-        Required converter settings: uniformThetaMesh, thetaBins
+        Required converter settings: ``uniformThetaMesh``,``thetaBins``
 
     See Also
     --------
@@ -54,11 +61,10 @@ class RZThetaReactorMeshConverter(MeshConverter):
     RZThetaReactorMeshConverterByRingCompositionAxialCoordinates
     """
 
-    def __init__(self, cs):
-        MeshConverter.__init__(self, cs)
+    def __init__(self, converterSettings):
+        MeshConverter.__init__(self, converterSettings)
         self._useUniformThetaMesh = None
         self._numThetaMeshBins = None
-        self._converterSettings = None
         self._axialSegsPerBin = None
         self._ringsPerBin = None
         self._numRingsInCore = None
@@ -71,10 +77,11 @@ class RZThetaReactorMeshConverter(MeshConverter):
         self.numAxialMeshBins = None
         self.numThetaMeshBins = None
 
-    def generateMesh(self, r=None, converterSettings=None):
+    def generateMesh(self, r=None):
         core = r.core
-        self._useUniformThetaMesh = converterSettings.get("uniformThetaMesh")
-        self._numThetaMeshBins = converterSettings.get("thetaBins")
+        converterSettings = self._converterSettings
+        self._useUniformThetaMesh = converterSettings["uniformThetaMesh"]
+        self._numThetaMeshBins = converterSettings["thetaBins"]
         self._converterSettings = converterSettings
         self._numRingsInCore = core.getNumHexRings()
         self._assemsInCore = core.getAssemblies()
@@ -209,9 +216,7 @@ class _RZThetaReactorMeshConverterByAxialCoordinates(RZThetaReactorMeshConverter
 
     def setAxialMesh(self):
         """Set up the reactor's new radial rings based on a user-specified axial coordinate list (axial mesh)."""
-        self.axialMesh = self._converterSettings.get("axialMesh")
-        if self.axialMesh is None:
-            raise ValueError("No axial mesh was provided in the converter settings")
+        self.axialMesh = self._converterSettings["axialMesh"]
 
 
 class _RZThetaReactorMeshConverterByAxialBins(RZThetaReactorMeshConverter):
@@ -220,8 +225,9 @@ class _RZThetaReactorMeshConverterByAxialBins(RZThetaReactorMeshConverter):
 
     Notes
     -----
-    The new mesh structure is formed by merging multiply "bins" together (i.e. numPerBin = 2 and the original mesh is
-    [1, 2, 3, 4, 5, 6, 7, 8], the new mesh structure will be [2, 4, 6, 8]).
+    The new mesh structure is formed by merging multiply "bins" together (i.e. numPerBin
+    = 2 and the original mesh is [1, 2, 3, 4, 5, 6, 7, 8], the new mesh structure will
+    be [2, 4, 6, 8]).
     """
 
     def setAxialMesh(self):
@@ -235,11 +241,7 @@ class _RZThetaReactorMeshConverterByAxialBins(RZThetaReactorMeshConverter):
             axialSegsPerBin = 2
             Merged core axial mesh list - [50.0, 100.0, 175.0] cm
         """
-        self._axialSegsPerBin = self._converterSettings.get("axialSegsPerBin")
-        if self._axialSegsPerBin is None:
-            raise ValueError(
-                "Axial segments per bin were specified in the converter settings"
-            )
+        self._axialSegsPerBin = self._converterSettings["axialSegsPerBin"]
         self._mergeAxialMeshByAxialSegsPerBin()
 
     def _mergeAxialMeshByAxialSegsPerBin(self):
@@ -389,14 +391,14 @@ def generateBins(totalNumDataPoints, numPerBin, minNum):
 class AxialExpansionModifier(MeshConverter):
     """
     Axially expand or contract a reactor.
-    
+
     Useful for fuel performance, thermal expansion, reactivity coefficients, etc.
     """
 
     def __init__(self, percent, fuelLockedToClad=False, cs=None):
         """
         Build an axial expansion converter.
-        
+
         Parameters
         ----------
         percent : float
@@ -419,23 +421,23 @@ class AxialExpansionModifier(MeshConverter):
 
         Notes
         -----
-        This loops through the fuel blocks, making their height larger by a fraction
-        of maxPercent. It reduces the homogenized actinide number densities to conserve atoms.
+        This loops through the fuel blocks, making their height larger by a fraction of
+        maxPercent. It reduces the homogenized actinide number densities to conserve
+        atoms.
 
-        This is a first approximation, adjusting the whole core uniformly and adjusting fuel
-        with structure and everything.
+        This is a first approximation, adjusting the whole core uniformly and adjusting
+        fuel with structure and everything.
 
-        When fuel is locked to clad, this only expands the actinides! So the structural materials
-        and sodium stay as they are in terms of density. By growing the mesh, we are introducing
-        NEW ATOMS of these guys, thus violating conservation of atoms. However, the new ones are
-        effectively piled up on top of the reactor where they are neutronically uninteresting.
-        This approximates fuel movement without clad/duct movement.
+        When fuel is locked to clad, this only expands the actinides! So the structural
+        materials and sodium stay as they are in terms of density. By growing the mesh,
+        we are introducing NEW ATOMS of these guys, thus violating conservation of
+        atoms. However, the new ones are effectively piled up on top of the reactor
+        where they are neutronically uninteresting.  This approximates fuel movement
+        without clad/duct movement.
         """
-        from terrapower.physics.fuelPerformance.crucible import crucible
+        adjustFlags = Flags.FUEL | Flags.CLAD if self._fuelLockedToClad else Flags.FUEL
+        adjustList = getAxialExpansionNuclideAdjustList(r, adjustFlags)
 
-        adjustList = crucible.getAxialExpansionNuclideAdjustList(
-            r, locked=self._fuelLockedToClad
-        )
         runLog.extra(
             "Conserving mass during axial expansion for: {0}".format(str(adjustList))
         )
@@ -447,7 +449,7 @@ class AxialExpansionModifier(MeshConverter):
 
         r.core.p.axialExpansionPercent = self._percent
 
-        if not self._cs["detailedAxialExpansion"]:
+        if not self._converterSettings["detailedAxialExpansion"]:
             # loop through again now that the reference is adjusted and adjust the non-fuel assemblies.
             refAssem = r.core.getFirstAssembly(Flags.FUEL) or r.core.getFirstAssembly()
             axMesh = refAssem.getAxialMesh()
@@ -463,3 +465,31 @@ class AxialExpansionModifier(MeshConverter):
             "Adjusted full core fuel axial mesh uniformly "
             "{0}% from {1} cm to {2} cm.".format(self._percent, oldMesh, newMesh)
         )
+
+
+def getAxialExpansionNuclideAdjustList(r, componentFlags: TypeSpec = None):
+    r"""
+    Determine which nuclides should have their mass conserved during axial expansion
+
+    Parameters
+    ----------
+    r : Reactor
+        The Reactor object to search for nuclide instances
+    componentFlags : TypeSpec, optional
+        A type specification to use for filtering components that should conserve mass.
+        If None, Flags.FUEL is used.
+
+
+    """
+
+    if componentFlags is None:
+        componentFlags = [Flags.FUEL]
+
+    adjustSet = {
+        nuc
+        for b in r.core.getBlocks()
+        for c in b.getComponents(componentFlags)
+        for nuc in c.getNuclides()
+    }
+
+    return list(adjustSet)

@@ -29,7 +29,7 @@ from numpy import interp
 
 from armi.nucDirectory import nuclideBases
 from armi.utils.units import getTk
-from armi.materials.material import Material
+from armi.materials import material
 from armi import runLog
 
 HeatCapacityConstants = collections.namedtuple(
@@ -37,7 +37,7 @@ HeatCapacityConstants = collections.namedtuple(
 )
 
 
-class UraniumOxide(Material):
+class UraniumOxide(material.FuelMaterial):
     name = "Uranium Oxide"
     references = {
         "thermal conductivity": "Thermal conductivity of uranium dioxide by nonequilibrium molecular dynamics simulation. S. Motoyama. Physical Review B, Volume 60, Number 1, July 1999",
@@ -88,7 +88,7 @@ class UraniumOxide(Material):
     def getTD(self):
         return self.theoreticalDensityFrac
 
-    def applyInputParams(self, U235_wt_frac=None, TD_frac=None):
+    def applyInputParams(self, U235_wt_frac=None, TD_frac=None, *args, **kwargs):
         if U235_wt_frac:
             self.adjustMassEnrichment(U235_wt_frac)
 
@@ -104,6 +104,7 @@ class UraniumOxide(Material):
             self.adjustTD(td)
         else:
             self.adjustTD(1.00)  # default to fully dense.
+        material.FuelMaterial.applyInputParams(self, *args, **kwargs)
 
     def setDefaultMassFracs(self):
         r"""
@@ -111,18 +112,20 @@ class UraniumOxide(Material):
         """
         u235 = nuclideBases.byName["U235"]
         u238 = nuclideBases.byName["U238"]
-        o16 = nuclideBases.byName["O16"]
+        oxygen = nuclideBases.byName["O"]
 
         u238Abundance = (
             1.0 - u235.abundance
         )  # neglect U234 and keep U235 at natural level
         gramsIn1Mol = (
-            2 * o16.weight + u235.abundance * u235.weight + u238Abundance * u238.weight
+            2 * oxygen.weight
+            + u235.abundance * u235.weight
+            + u238Abundance * u238.weight
         )
 
         self.setMassFrac("U235", u235.weight * u235.abundance / gramsIn1Mol)
         self.setMassFrac("U238", u238.weight * u238Abundance / gramsIn1Mol)
-        self.setMassFrac("O16", 2 * o16.weight / gramsIn1Mol)
+        self.setMassFrac("O", 2 * oxygen.weight / gramsIn1Mol)
 
     def meltingPoint(self):
         """

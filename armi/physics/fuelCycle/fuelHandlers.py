@@ -40,7 +40,7 @@ from armi import runLog
 from armi.localization.exceptions import InputError
 from armi.reactor.flags import Flags
 from armi.operators import RunTypes
-from armi.utils import directoryChangers
+from armi.utils import directoryChangers, pathTools
 from armi import utils
 
 
@@ -68,7 +68,8 @@ class FuelHandlerInterface(interfaces.Interface):
 
     @staticmethod
     def specifyInputs(cs):
-        return {"fuel management": [cs["shuffleLogic"]]}
+        files = [cs[label] for label in ["shuffleLogic", "explicitRepeatShuffles"] if cs[label]]
+        return {"fuel management": files}
 
     def interactBOC(self, cycle=None):
         """
@@ -89,7 +90,7 @@ class FuelHandlerInterface(interfaces.Interface):
         if self.enabled():
             self.manageFuel(cycle)
 
-        self.r.core.p.numAssembliesInSFP = self.r.core.p.powerMultiplier * len(
+        self.r.core.p.numAssembliesInSFP = self.r.core.powerMultiplier * len(
             self.r.core.sfp
         )
 
@@ -221,14 +222,7 @@ def fuelHandlerFactory(operator):
     # from the input directory.
     with directoryChangers.DirectoryChanger(cs.inputDirectory):
         try:
-            # Import from custom code according to the importlib docs.
-            moduleName = os.path.split(fuelHandlerModulePath)[-1]
-            moduleName = os.path.splitext(moduleName)[0]  # take off the extension
-            spec = importlib.util.spec_from_file_location(
-                moduleName, fuelHandlerModulePath
-            )
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            module = pathTools.importCustomPyModule(fuelHandlerModulePath)
 
             if not hasattr(module, fuelHandlerClassName):
                 raise KeyError(
@@ -359,7 +353,7 @@ class FuelHandler:
 
         # inform the reactor of how many moves occurred so it can put the number in the database.
         if self.moved:
-            numMoved = len(self.moved) * self.r.core.p.powerMultiplier
+            numMoved = len(self.moved) * self.r.core.powerMultiplier
 
             # tell the reactor which assemblies moved where
             # also tell enrichments of each block in case there's some autoboosting going on.

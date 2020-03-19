@@ -29,6 +29,7 @@ from armi.reactor import reactors
 from armi.reactor.assemblies import *
 from armi.tests import TEST_ROOT
 from armi.utils import directoryChangers
+from armi.utils import textProcessors
 import armi.reactor.tests.test_reactors
 
 
@@ -97,7 +98,7 @@ def buildTestAssemblies():
 
     block = blocks.HexBlock("fuel", caseSetting)
     block2 = blocks.HexBlock("fuel", caseSetting)
-    block.p.type = "fuel"
+    block.setType("fuel")
     block.setHeight(10.0)
     block.addComponent(fuelUZr)
     block.addComponent(fuelUTh)
@@ -107,7 +108,7 @@ def buildTestAssemblies():
     block.p.molesHmBOL = 1.0
     block.p.molesHmNow = 1.0
 
-    block2.p.type = "fuel"
+    block2.setType("fuel")
     block2.setHeight(10.0)
     block2.addComponent(fuelUThZr)
     block2.addComponent(clad)
@@ -189,8 +190,8 @@ class Assembly_TestCase(unittest.TestCase):
             "error"
         )  # Print nothing to the screen that would normally go to the log.
 
-        self.r = tests.getEmptyHexReactor(self.cs)
-        self.r.core.symmetry = "third core periodic"
+        self.r = tests.getEmptyHexReactor()
+        self.r.core.symmetry = "third periodic"
 
         self.Assembly = makeTestAssembly(NUM_BLOCKS, self.assemNum, r=self.r)
         self.r.core.add(self.Assembly)
@@ -575,9 +576,10 @@ class Assembly_TestCase(unittest.TestCase):
         with directoryChangers.DirectoryChanger(TEST_ROOT):
             self.cs["loadingFile"] = "refSmallReactor.yaml"
             with open(self.cs["loadingFile"], "r") as y:
+                y = textProcessors.resolveMarkupInclusions(y)
                 self.r.blueprints = blueprints.Blueprints.load(y)
 
-            self.r.blueprints._prepConstruction("hex", self.cs)
+            self.r.blueprints._prepConstruction(self.cs)
 
     def test_duplicate(self):
         self._setup_blueprints()
@@ -1446,10 +1448,8 @@ class AnnularFuelTestCase(unittest.TestCase):
         self.cs["xsKernel"] = "MC2v2"  # don't try to expand elementals
         settings.setMasterCs(self.cs)
         bp = blueprints.Blueprints()
-        geom = geometry.SystemLayoutInput()
-        geom.symmetry = "third core periodic"
-        self.r = reactors.Reactor(self.cs, bp)
-        self.r.add(reactors.Core("Core", self.cs, geom))
+        self.r = reactors.Reactor("test", bp)
+        self.r.add(reactors.Core("Core"))
 
         inputStr = """blocks:
     ann fuel: &block_ann_fuel
@@ -1518,7 +1518,7 @@ assemblies:
         xs types:  &inner_igniter_fuel_xs_types [D]
 """
         self.blueprints = blueprints.Blueprints.load(inputStr)
-        self.blueprints._prepConstruction("hex", self.cs)
+        self.blueprints._prepConstruction(self.cs)
 
     def test_areaCheck(self):
         assembly = list(self.blueprints.assemblies.values())[0]

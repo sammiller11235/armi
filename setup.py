@@ -16,6 +16,7 @@
 import re
 from setuptools import setup, find_packages
 
+
 with open("README.rst") as f:
     README = f.read()
 
@@ -37,7 +38,8 @@ EXTRA_FILES = collectExtraFiles()
 
 setup(
     name="armi",
-    version="0.1",  # manually duplicated in meta.py... for now
+    # duplicating with meta.py for now. See comments there for rationale.
+    version="0.1.4",
     description="The Advanced Reactor Modeling Interface",
     author="TerraPower, LLC",
     author_email="armi-devs@terrapower.com",
@@ -48,13 +50,13 @@ setup(
     packages=find_packages(),
     package_data={"armi": ["resources/*", "resources/**/*"] + EXTRA_FILES},
     entry_points={"console_scripts": ["armi = armi.__main__:main"]},
+    # note that these are duplicated in requirements.txt
     install_requires=[
         "configparser",
         "coverage",
         "future",
         "h5py",
         "matplotlib",
-        "mpi4py",
         "numpy",
         "ordered-set",
         "pillow",
@@ -68,6 +70,7 @@ setup(
         "xlrd",
         "yamlize",
     ],
+    extras_require={"mpi": ["mpi4py"]},
     tests_require=["nbconvert", "jupyter_client", "ipykernel"],
     classifiers=[
         "Development Status :: 4 - Beta",

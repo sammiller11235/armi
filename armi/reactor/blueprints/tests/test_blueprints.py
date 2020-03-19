@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests the blueprints (loading input) file"""
+import pathlib
 import unittest
 
 import yamlize
@@ -24,24 +25,26 @@ from armi.nucDirectory.elements import bySymbol
 from armi import settings
 from armi.tests import TEST_ROOT
 from armi.utils import directoryChangers
+from armi.utils import textProcessors
 from armi.reactor.blueprints.isotopicOptions import NuclideFlags, CustomIsotopics
 from armi.reactor.blueprints.componentBlueprint import ComponentBlueprint
 from armi.physics.neutronics import isotopicDepletion
 
 
 class TestBlueprints(unittest.TestCase):
-    """Test that the basic functionality of faithfully receiving user input to construct ARMI
-    data model objects works as expected.
+    """Test that the basic functionality of faithfully receiving user input to construct
+    ARMI data model objects works as expected.
 
-    Values are hopefully not hardcoded in here, just sanity checks that nothing messed up as this is
-    code has VERY high incidental coverage from other tests.
+    Values are hopefully not hardcoded in here, just sanity checks that nothing messed
+    up as this is code has VERY high incidental coverage from other tests.
 
-    NOTE: as it stands it seems a little hard to test more granularity with the blueprints file
-    as each initialization is intended to be a complete load from the input file, and each load also
+    NOTE: as it stands it seems a little hard to test more granularity with the
+    blueprints file as each initialization is intended to be a complete load from the
+    input file, and each load also
     makes calls out to the reactor for some assembly initialization steps.
 
-    TODO: see the above note, and try to test blueprints on a wider range of input files, touching
-    on each failure case.
+    TODO: see the above note, and try to test blueprints on a wider range of input
+    files, touching on each failure case.
 
     """
 
@@ -53,8 +56,9 @@ class TestBlueprints(unittest.TestCase):
         isotopicDepletion.applyDefaultBurnChain()
 
         with open("refSmallReactor.yaml", "r") as y:
+            y = textProcessors.resolveMarkupInclusions(y)
             cls.blueprints = blueprints.Blueprints.load(y)
-            cls.blueprints._prepConstruction("hex", cls.cs)
+            cls.blueprints._prepConstruction(cls.cs)
 
     @classmethod
     def tearDownClass(cls):
@@ -125,6 +129,15 @@ assemblies:
         <<: *assembly_a
         fuelVent: True
         hotChannelFactors: Reactor
+grids:
+    pins:
+        geom: cartesian
+        lattice map: |
+            2 2 2 2 2
+            2 1 1 1 2
+            2 1 3 1 2
+            2 3 1 1 2
+            2 2 2 2 2
 """
 
     def test_assemblyParameters(self):
@@ -153,7 +166,7 @@ assemblies:
         cs = settings.Settings()
         cs["xsKernel"] = "MC2v2"
         design = blueprints.Blueprints.load(self.yamlString)
-        design._prepConstruction("hex", cs)
+        design._prepConstruction(cs)
         self.assertTrue(
             set({"U238", "U235", "ZR"}).issubset(set(design.allNuclidesInProblem))
         )
@@ -168,7 +181,7 @@ assemblies:
         cs = settings.Settings()
         cs["xsKernel"] = "MC2v3"
         design = blueprints.Blueprints.load(self.yamlString)
-        design._prepConstruction("hex", cs)
+        design._prepConstruction(cs)
 
         # 93 and 95 are not naturally occurring.
         zrNucs = {"ZR" + str(A) for A in range(90, 97)} - {"ZR93", "ZR95"}
@@ -200,6 +213,7 @@ nuclide flags:
     MN:  {burn: true, xs: true}
     NA:  {burn: true, xs: true}
     V:  {burn: true, xs: true}
+    W:  {burn: true, xs: true}
 blocks:
     nomerge block: &unmerged_block
         A: &comp_a
@@ -340,7 +354,7 @@ assemblies:
                 "Tinput": 1.0,
                 "Thot": 1.0,
             },
-            {"shape": "Circle", "name": "name", "Tinput": 1.0, "Thot": 1.0,},
+            {"shape": "Circle", "name": "name", "Tinput": 1.0, "Thot": 1.0},
             {"shape": "circle", "name": "name", "material": "HT9", "Thot": 1.0},
             {"shape": "circle", "name": "name", "material": "HT9", "Tinput": 1.0},
             {

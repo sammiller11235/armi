@@ -58,8 +58,9 @@ class CaseSuite:
         """
         Add a Case object to the CaseSuite
 
-        Case objects within a CaseSuite must have unique ``title`` attributes, a KeyError will be
-        raised """
+        Case objects within a CaseSuite must have unique ``title`` attributes, a
+        KeyError will be raised
+        """
         existing = next((c for c in self if case == c), None)
         if existing is not None:
             raise ValueError(
@@ -267,7 +268,7 @@ class CaseSuite:
             Similar to this but doesn't let you write out new geometry or blueprints objects.
         """
         for case in self:
-            case.writeInputs()
+            case.writeInputs(sourceDir=self.cs.inputDirectory)
 
     def writeTable(self, tableResults):
         """Write a table summarizing the test differences."""

@@ -36,6 +36,7 @@ from armi.reactor import grids
 from armi.reactor.tests.test_assemblies import makeTestAssembly
 from armi.tests import ISOAA_PATH
 from armi.nuclearDataIO import isotxs
+from armi.reactor import geometry
 
 
 def loadTestBlock(cold=True):
@@ -44,7 +45,7 @@ def loadTestBlock(cold=True):
     settings.setMasterCs(caseSetting)
     runLog.setVerbosity("error")
     caseSetting["nCycles"] = 1
-    r = tests.getEmptyHexReactor(caseSetting)
+    r = tests.getEmptyHexReactor()
 
     assemNum = 3
     block = blocks.HexBlock("TestHexBlock")
@@ -432,14 +433,11 @@ class Block_TestCase(unittest.TestCase):
     def test_setNumberDensities(self):
         """Make sure we can set multiple number densities at once."""
         b = self.Block
-        b.setNumberDensity("NA23", 0.5)
+        b.setNumberDensity("NA", 0.5)
         refDict = {
             "U235": 0.00275173784234,
             "U238": 0.0217358415457,
-            "W182": 1.09115150103e-05,
-            "W183": 5.89214392093e-06,
-            "W184": 1.26159558164e-05,
-            "W186": 1.17057432664e-05,
+            "W": 1.09115150103e-05,
             "ZR": 0.00709003962772,
         }
 
@@ -641,7 +639,10 @@ class Block_TestCase(unittest.TestCase):
         self.assertEqual(b.getSymmetryFactor(), 1.0)
 
         # center blocks have a different symmetry factor for 1/3rd core
-        for symmetry, powerMult in (("full core", 1), ("third core periodic", 3)):
+        for symmetry, powerMult in (
+            (geometry.FULL_CORE, 1),
+            (geometry.THIRD_CORE + geometry.PERIODIC, 3),
+        ):
             self.r.core.symmetry = symmetry
             i, j = grids.getIndicesFromRingAndPos(1, 1)
             b.spatialLocator = b.core.spatialGrid[i, j, 0]
@@ -878,7 +879,7 @@ class Block_TestCase(unittest.TestCase):
             }
         )
 
-        self.Block.completeInitialLoading(bolBlock=self.Block)
+        self.Block.completeInitialLoading()
 
         cur = self.Block.p.molesHmBOL
         ref = self.Block.getHMDens() / MOLES_PER_CC_TO_ATOMS_PER_BARN_CM * height * area
@@ -1229,12 +1230,12 @@ class Block_TestCase(unittest.TestCase):
         b = self.Block
         bond = b.getComponent(Flags.BOND)
         bondRemovalFrac = 0.705
-        ndensBefore = b.getNumberDensity("NA23")
-        bondNdensBefore = bond.getNumberDensity("NA23")
+        ndensBefore = b.getNumberDensity("NA")
+        bondNdensBefore = bond.getNumberDensity("NA")
         b.p.bondBOL = bondNdensBefore
         b.enforceBondRemovalFraction(bondRemovalFrac)
-        bondNdensAfter = bond.getNumberDensity("NA23")
-        ndensAfter = b.getNumberDensity("NA23")
+        bondNdensAfter = bond.getNumberDensity("NA")
+        ndensAfter = b.getNumberDensity("NA")
 
         self.assertAlmostEqual(
             bondNdensAfter / bondNdensBefore, (1.0 - bondRemovalFrac)
@@ -1243,8 +1244,8 @@ class Block_TestCase(unittest.TestCase):
 
         # make sure it doesn't change if you run it twice
         b.enforceBondRemovalFraction(bondRemovalFrac)
-        bondNdensAfter = bond.getNumberDensity("NA23")
-        ndensAfter = b.getNumberDensity("NA23")
+        bondNdensAfter = bond.getNumberDensity("NA")
+        ndensAfter = b.getNumberDensity("NA")
         self.assertAlmostEqual(
             bondNdensAfter / bondNdensBefore, (1.0 - bondRemovalFrac)
         )
@@ -1289,6 +1290,19 @@ class Block_TestCase(unittest.TestCase):
             601494405.293505,
         ]
         xslib = isotxs.readBinary(ISOAA_PATH)
+        # slight hack here because the test block was created
+        # by hand rather than via blueprints and so elemental expansion
+        # of isotopics did not occur. But, the ISOTXS library being used
+        # did go through an isotopic expansion, so we map nuclides here.
+        xslib._nuclides["NAAA"] = xslib._nuclides[
+            "NA23AA"
+        ]  # pylint: disable=protected-access
+        xslib._nuclides["WAA"] = xslib._nuclides[
+            "W184AA"
+        ]  # pylint: disable=protected-access
+        xslib._nuclides["MNAA"] = xslib._nuclides[
+            "MN55AA"
+        ]  # pylint: disable=protected-access
         # macroCreator = xsCollections.MacroscopicCrossSectionCreator()
         # macros = macroCreator.createMacrosFromMicros(xslib, self.Block)
         self.Block.p.mgFlux = flux
@@ -1398,6 +1412,7 @@ class Block_TestCase(unittest.TestCase):
         fuel = self.Block.getComponent(Flags.FUEL)
         mult = fuel.getDimension("mult")
         self.assertGreater(mult, 1.0)
+        self.Block.completeInitialLoading()
         self.Block.breakFuelComponentsIntoIndividuals()
         self.assertEqual(fuel.getDimension("mult"), 1.0)
 
@@ -1433,7 +1448,7 @@ class HexBlock_TestCase(unittest.TestCase):
         self.HexBlock.addComponent(
             components.DerivedShape("coolant", "Sodium", Tinput=273.0, Thot=273.0)
         )
-        r = tests.getEmptyHexReactor(caseSetting)
+        r = tests.getEmptyHexReactor()
         a = makeTestAssembly(1, 1)
         a.add(self.HexBlock)
         loc1 = r.core.spatialGrid[0, 1, 0]
@@ -1491,9 +1506,9 @@ class HexBlock_TestCase(unittest.TestCase):
     def test_retainState(self):
         """Ensure retainState restores params and spatialGrids."""
         self.HexBlock.spatialGrid = grids.hexGridFromPitch(1.0)
-        self.HexBlock.p.type = "intercoolant"
+        self.HexBlock.setType("intercoolant")
         with self.HexBlock.retainState():
-            self.HexBlock.p.type = "fuel"
+            self.HexBlock.setType("fuel")
             self.HexBlock.spatialGrid.changePitch(2.0)
         self.assertEqual(self.HexBlock.spatialGrid.pitch, 1.0)
         self.assertTrue(self.HexBlock.hasFlags(Flags.INTERCOOLANT))

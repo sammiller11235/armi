@@ -26,6 +26,7 @@ from armi.reactor import parameters
 from armi.reactor.blueprints import componentBlueprint
 from armi.reactor.converters import blockConverters
 from armi.reactor.locations import AXIAL_CHARS
+from armi.reactor import grids
 
 
 def _configureGeomOptions():
@@ -43,8 +44,8 @@ class BlockBlueprint(yamlize.KeyedList):
 
     item_type = componentBlueprint.ComponentBlueprint
     key_attr = componentBlueprint.ComponentBlueprint.name
-    name = yamlize.Attribute(type=str)
-
+    name = yamlize.Attribute(key="name", type=str)
+    gridName = yamlize.Attribute(key="grid name", type=str, default=None)
     _geomOptions = _configureGeomOptions()
 
     def _getBlockClass(self, outerComponent):
@@ -98,18 +99,30 @@ class BlockBlueprint(yamlize.KeyedList):
         runLog.debug("Constructing block {}".format(self.name))
         appliedMatMods = False
         components = collections.OrderedDict()
-
-        for cDesign in self:
-            c, compAppliedMatMods = cDesign.construct(blueprint, materialInput)
+        # build grid before components so you can load
+        # the components into the grid.
+        gridDesign = self._getGridDesign(blueprint)
+        if gridDesign:
+            spatialGrid = gridDesign.construct()
+        else:
+            spatialGrid = None
+        for componentDesign in self:
+            c = componentDesign.construct(blueprint, materialInput)
             components[c.name] = c
-            appliedMatMods |= compAppliedMatMods
-
-        if any(materialInput) and not appliedMatMods:
-            raise ValueError(
-                "Failure to apply material modifications {} in block {}".format(
-                    materialInput, self.name
+            if spatialGrid:
+                c.spatialLocator = gridDesign.getMultiLocator(
+                    spatialGrid, componentDesign.latticeIDs
                 )
-            )
+                mult = c.getDimension("mult")
+                if mult and mult != 1.0 and mult != len(c.spatialLocator):
+                    raise ValueError(
+                        f"Conflicting ``mult`` input ({mult}) and number of "
+                        f"lattice positions ({len(c.spatialLocator)}) for {c}. "
+                        "Recommend leaving off ``mult`` input when using grids."
+                    )
+                elif not mult or mult == 1.0:
+                    # learn mult from grid definition
+                    c.setDimension("mult", len(c.spatialLocator))
 
         for c in components.values():
             c._resolveLinkedDims(components)
@@ -138,8 +151,25 @@ class BlockBlueprint(yamlize.KeyedList):
         b.buildNumberDensityParams(nucNames=blueprint.allNuclidesInProblem)
         b = self._mergeComponents(b)
         b.verifyBlockDims()
+        b.spatialGrid = spatialGrid
 
         return b
+
+    def _getGridDesign(self, blueprint):
+        """
+        Get the appropriate grid design
+
+        This happens when a lattice input is provided on the block. Otherwise all
+        components are ambiguously defined in the block.
+        """
+        if self.gridName:
+            if self.gridName not in blueprint.gridDesigns:
+                raise KeyError(
+                    f"Lattice {self.gridName} defined on {self} is not "
+                    "defined in the blueprints `lattices` section."
+                )
+            return blueprint.gridDesigns[self.gridName]
+        return None
 
     def _mergeComponents(self, b):
         solventNamesToMergeInto = set(c.p.mergeWith for c in b if c.p.mergeWith)

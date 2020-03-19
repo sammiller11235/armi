@@ -1,9 +1,0 @@
-=======================
-ARMI v0.1 Release Notes
-=======================
-
-ARMI v0.1.0
-===========
-Release Date: (31 October 2019)
-
-Initial public release.

@@ -1,6 +1,5 @@
 numpy
 scipy
-mpi4py
 yamlize
 matplotlib
 h5py
@@ -14,3 +13,4 @@ pillow
 future
 configparser
 voluptuous
+pympler

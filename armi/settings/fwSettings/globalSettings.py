@@ -546,7 +546,7 @@ def defineSettings() -> List[setting.Setting]:
             label="Run Type",
             description="Type of run that this is, e.g. a normal run through all "
             "cycles, a snapshot loaded rx. coefficient run, etc.",
-            options=["Standard", "Equilibrium", "Snapshots",],
+            options=["Standard", "Equilibrium", "Snapshots"],
         ),
         setting.Setting(
             CONF_EXPLICIT_REPEAT_SHUFFLES,
@@ -654,7 +654,7 @@ def defineSettings() -> List[setting.Setting]:
             default="TWRC",
             label="Hot Channel Factor Set",
             description="Switch to apply different sets of hot channel factors based  on design being analyzed",
-            options=["TWRC", "TWRP", "TWRC-HEX",],
+            options=["TWRC", "TWRP", "TWRC-HEX"],
         ),
         setting.Setting(
             CONF_LOOSE_COUPLING,
@@ -695,7 +695,7 @@ def defineSettings() -> List[setting.Setting]:
         setting.Setting(
             CONF_OUTPUT_CACHE_LOCATION,
             default="",
-            label="Location of output cache.",
+            label="Location of output cache",
             description="Location where cached calculations are stored and "
             "retrieved if exactly the same as the calculation requested. Empty "
             "string will not cache",

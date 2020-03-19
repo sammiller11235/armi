@@ -103,7 +103,6 @@ class Block(composites.Composite):
         composites.Composite.__init__(self, name)
         self.makeUnique()
         self.p.height = height
-        self.massHMBOL = 0.0  # in grams
 
         if location:
             k = location.axial
@@ -252,12 +251,16 @@ class Block(composites.Composite):
 
     def makeUnique(self):
         """
-        This function assigns a unique id (integer value) for each block. This should be called whenever creating a
-        block that is intended to be treated as a unique object. For example, if you were to broadcast or pickle a block
-        it should have the same ID across all nodes. Likewise, if you deepcopy a block for a temporary purpose to it
-        should have the same ID.  However, ARMI's assembly construction also uses deepcopy, and in order to keep that
-        functionality, this method needs to be called after creating a fresh assembly (from deepcopy).
+        Assign a unique id (integer value) for each block.
+
+        This should be called whenever creating a block that is intended to be treated
+        as a unique object. For example, if you were to broadcast or pickle a block it
+        should have the same ID across all nodes. Likewise, if you deepcopy a block for
+        a temporary purpose to it should have the same ID.  However, ARMI's assembly
+        construction also uses deepcopy, and in order to keep that functionality, this
+        method needs to be called after creating a fresh assembly (from deepcopy).
         """
+
         self.p.id = self.__class__.uniqID
         self.__class__.uniqID += 1
 
@@ -267,12 +270,15 @@ class Block(composites.Composite):
 
         Notes
         -----
-        1 - Smear density is the area of the fuel divided by the area of the space available for fuel
-            inside the cladding. Other space filled with solid materials is not considered available.
-            If all the area is fuel, it has 100% smear density. Lower smear density allows more room for swelling.
-        2 - Negative areas can exist for void gaps in the fuel pin. A negative area in a gap represents overlap area
-            between two solid components. To account for this additional space within the pin cladding the
-            abs(negativeArea) is added to the inner cladding area.
+        1 - Smear density is the area of the fuel divided by the area of the space
+            available for fuel inside the cladding. Other space filled with solid
+            materials is not considered available. If all the area is fuel, it has 100%
+            smear density. Lower smear density allows more room for swelling.
+        2 - Negative areas can exist for void gaps in the fuel pin. A negative area in a
+            gap represents overlap area between two solid components. To account for
+            this additional space within the pin cladding the abs(negativeArea) is added
+            to the inner cladding area.
+
         Parameters
         -----------
         cold : bool, optional
@@ -544,16 +550,18 @@ class Block(composites.Composite):
         Returns the microscopic library suffix (e.g. 'AB') for this block.
 
         DIF3D and MC2 are limited to 6 character nuclide labels. ARMI by convention uses
-        the first 4 for nuclide name (e.g. U235, PU39, etc.) and then uses the 5th character
-        for cross-section type and the 6th for burnup group. This allows a variety of XS sets
-        to be built modeling substantially different blocks.
+        the first 4 for nuclide name (e.g. U235, PU39, etc.) and then uses the 5th
+        character for cross-section type and the 6th for burnup group. This allows a
+        variety of XS sets to be built modeling substantially different blocks.
 
         Notes
         -----
-        The single-letter use for xsType and buGroup limit users to 26 groups of each. ARMI will allow
-        2-letter xsType designations if and only if the `buGroups` setting has length 1 (i.e. no burnup
-        groups are defined). This is useful for high-fidelity XS modeling of V&V models such as the ZPPRs.
+        The single-letter use for xsType and buGroup limit users to 26 groups of each.
+        ARMI will allow 2-letter xsType designations if and only if the `buGroups`
+        setting has length 1 (i.e. no burnup groups are defined). This is useful for
+        high-fidelity XS modeling of V&V models such as the ZPPRs.
         """
+
         bu = self.p.buGroup
         if not bu:
             raise RuntimeError(
@@ -575,7 +583,8 @@ class Block(composites.Composite):
         nuc : str
             a nuclide name like U235, PU240, FE
         newHomogNDens : float
-            number density to set in units of atoms/barn-cm, which are equal to atoms/cm^3*1e24
+            number density to set in units of atoms/barn-cm, which are equal to
+            atoms/cm^3*1e24
 
         See Also
         --------
@@ -760,11 +769,8 @@ class Block(composites.Composite):
         completeInitialLoading must be run because adjusting the enrichment actually
         changes the mass slightly and you can get negative burnups, which you do not want.
         """
-        fuels = []
-        for c in self.getChildren():
-            if "fuel" in c.getName().lower():
-                # this component has fuel
-                fuels.append(c)
+        fuels = self.getChildrenWithFlags(Flags.FUEL)
+
         if fuels:
             for fuel in fuels:
                 fuel.adjustMassEnrichment(newEnrich)
@@ -1083,14 +1089,15 @@ class Block(composites.Composite):
         """
         Does some BOL bookkeeping to track things like BOL HM density for burnup tracking.
 
-        runs after this block is loaded up at BOC (called from Reactor.initialLoading(Axial))
+        This should run after this block is loaded up at BOC (called from
+        Reactor.initialLoading).
 
-        original purpose of this was to get the moles HM at BOC for the moles Pu/moles HM at BOL
-        calculation
+        The original purpose of this was to get the moles HM at BOC for the moles
+        Pu/moles HM at BOL calculation.
 
-        This also must be called after modifying something like the smear density or zr fraction in
-        an optimization case.  In ECPT cases, a BOL block must be passed or else the burnup will
-        try to get based on a pre-burned value.
+        This also must be called after modifying something like the smear density or zr
+        fraction in an optimization case. In ECPT cases, a BOL block must be passed or
+        else the burnup will try to get based on a pre-burned value.
 
         Parameters
         ----------
@@ -1114,22 +1121,24 @@ class Block(composites.Composite):
         hmDens = bolBlock.getHMDens()  # total homogenized heavy metal number density
         self.p.molesHmBOL = self.getHMMoles()
         self.p.nHMAtBOL = hmDens
-        if self.getComponentsOfShape(
-            components.Circle
-        ):  # non-pinned reactors will not use smear density param
+        try:
+            # non-pinned reactors (or ones without cladding) will not use smear density
             self.p.smearDensity = self.getSmearDensity()
+        except ValueError:
+            pass
         self.p.enrichmentBOL = self.getEnrichment()
-        self.massHMBOL = 0.0
+        massHmBOL = 0.0
         sf = self.getSymmetryFactor()
         for child in self:
-            child.massHMBOL = child.getHMMass() * sf  # scale to full block
-            self.massHMBOL += child.massHMBOL
+            child.p.massHmBOL = child.getHMMass() * sf  # scale to full block
+            massHmBOL += child.p.massHmBOL
+        self.p.massHmBOL = massHmBOL
         return hmDens
 
     def replaceBlockWithBlock(self, bReplacement):
         """
         Replace the current block with the replacementBlock.
-        
+
         Typically used in the insertion of control rods.
         """
         paramsToSkip = set(
@@ -1743,11 +1752,7 @@ class Block(composites.Composite):
         return c.getProperties()
 
     def verifyBlockDims(self):
-        runLog.warning(
-            "Trying to verify block dimensions on {}, which does not know how to do "
-            "so. Make sure that your dimensions are correct!".format(self),
-            single=True,
-        )
+        """Optional dimension checking."""
         return
 
     def getDim(self, typeSpec, dimName):
@@ -1776,46 +1781,6 @@ class Block(composites.Composite):
         for c in self:
             if c.hasFlags(typeSpec):
                 return c.getDimension(dimName.lower())
-
-    def hasPinPitch(self):
-        """Return True if the block has enough information to calculate pin pitch."""
-        return self.getComponent(Flags.CLAD) and self.getComponent(Flags.WIRE)
-
-    def getPinPitch(self, cold=False):
-        """
-        Get the pin pitch in cm.
-
-        Parameters
-        ----------
-        cold : boolean
-            Determines whether the dimensions should be cold or hot
-
-        Returns
-        -------
-        pinPitch : float
-            pin pitch in cm
-
-        """
-        try:
-            clad = self.getComponent(Flags.CLAD)
-            wire = self.getComponent(Flags.WIRE)
-        except ValueError:
-            runLog.info(
-                "Block {} has multiple clad and wire components,"
-                " so pin pitch is not well-defined.".format(self)
-            )
-            return
-
-        if wire and clad:
-            return clad.getDimension("od", cold=cold) + wire.getDimension(
-                "od", cold=cold
-            )
-        else:
-            raise ValueError(
-                "Cannot get pin pitch in {} because it does not have a wire and a clad".format(
-                    self
-                )
-            )
 
     def getPinCenterFlatToFlat(self, cold=False):
         """Return the flat-to-flat distance between the centers of opposing pins in the outermost ring."""
@@ -1895,6 +1860,18 @@ class Block(composites.Composite):
             return p, c
         else:
             return p
+
+    def hasPinPitch(self):
+        """Return True if the block has enough information to calculate pin pitch."""
+        return self.spatialGrid is not None
+
+    def getPinPitch(self, cold=False):
+        """
+        Return sub-block pitch in blocks.
+
+        This assumes the spatial grid is defined by unit steps
+        """
+        return self.spatialGrid.pitch
 
     def getDimensions(self, dimension):
         """Return dimensional values of the specified dimension."""
@@ -2368,7 +2345,7 @@ class Block(composites.Composite):
         for pinNum, pin in enumerate(self.iterComponents(Flags.FUEL)):
             pin.p.flags = fuelFlags  # Update the fuel component flags to be the same as before the split (i.e., DEPLETABLE)
             self.p.molesHmBOLByPin.append(pin.getHMMoles())
-            pin.massHMBOL /= nPins
+            pin.p.massHmBOL /= nPins
 
     def getIntegratedMgFlux(self, adjoint=False, gamma=False):
         """
@@ -2855,6 +2832,49 @@ class HexBlock(Block):
         pinCenterCornerToCorner = 2 * (nRings - 1) * pinPitch
         pinCenterFlatToFlat = math.sqrt(3.0) / 2.0 * pinCenterCornerToCorner
         return pinCenterFlatToFlat
+
+    def hasPinPitch(self):
+        """Return True if the block has enough information to calculate pin pitch."""
+        return self.getComponent(Flags.CLAD) and self.getComponent(Flags.WIRE)
+
+    def getPinPitch(self, cold=False):
+        """
+        Get the pin pitch in cm.
+
+        Assumes that the pin pitch is defined entirely by contacting cladding tubes
+        and wire wraps. Grid spacers not yet supported.
+
+        Parameters
+        ----------
+        cold : boolean
+            Determines whether the dimensions should be cold or hot
+
+        Returns
+        -------
+        pinPitch : float
+            pin pitch in cm
+
+        """
+        try:
+            clad = self.getComponent(Flags.CLAD)
+            wire = self.getComponent(Flags.WIRE)
+        except ValueError:
+            runLog.info(
+                "Block {} has multiple clad and wire components,"
+                " so pin pitch is not well-defined.".format(self)
+            )
+            return
+
+        if wire and clad:
+            return clad.getDimension("od", cold=cold) + wire.getDimension(
+                "od", cold=cold
+            )
+        else:
+            raise ValueError(
+                "Cannot get pin pitch in {} because it does not have a wire and a clad".format(
+                    self
+                )
+            )
 
 
 class CartesianBlock(Block):
